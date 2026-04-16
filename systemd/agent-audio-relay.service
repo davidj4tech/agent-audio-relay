@@ -1,11 +1,17 @@
 [Unit]
-Description=agent-audio-relay — deliver TTS audio to phone
+Description=agent-audio-relay — deliver agent TTS audio to playback target
 After=network.target
 
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/agent-audio-relay
-Environment=RELAY_PHONE_HOST=p8ar
+# Backend: ssh-termux (default) or mpv
+Environment=RELAY_BACKEND=ssh-termux
+# ssh-termux backend settings:
+Environment=RELAY_SSH_HOST=p8ar
+# mpv backend settings (uncomment to use):
+# Environment=RELAY_BACKEND=mpv
+# Environment=RELAY_MPV_SOCKET=/tmp/mpv-relay.sock
 Environment=RELAY_WATCH_DIRS=/tmp/openclaw:/tmp
 Restart=always
 RestartSec=5
