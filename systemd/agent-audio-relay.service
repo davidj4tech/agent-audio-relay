@@ -1,0 +1,14 @@
+[Unit]
+Description=agent-audio-relay — deliver TTS audio to phone
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/agent-audio-relay
+Environment=RELAY_PHONE_HOST=p8ar
+Environment=RELAY_WATCH_DIRS=/tmp/openclaw:/tmp
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

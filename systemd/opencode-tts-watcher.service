@@ -1,0 +1,13 @@
+[Unit]
+Description=agent-audio-relay — OpenCode TTS watcher
+After=network.target
+Wants=agent-audio-relay.service
+
+[Service]
+Type=simple
+ExecStart=/path/to/agent-audio-relay/hooks/opencode-tts-hook.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
