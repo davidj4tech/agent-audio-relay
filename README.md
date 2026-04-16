@@ -184,7 +184,7 @@ Listens to the Home Assistant SSE event stream for
 responses delivered through HA.
 
 ```sh
-HA_TOKEN="your-long-lived-token" inputs/ha-tts-bridge.sh
+HA_TOKEN="your-long-lived-token" hooks/ha-tts-bridge.sh
 ```
 
 | Variable | Default | Meaning |
