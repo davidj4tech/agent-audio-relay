@@ -73,6 +73,88 @@ original backend — designed for Android phones running Termux over SSH.
 | `RELAY_SSH_MAX_RETRIES` | `2` | Retry count for SCP/play |
 | `RELAY_SSH_PLAYBACK_WAIT` | `120` | Max seconds to wait for playback |
 
+#### SSH setup for Termux
+
+The ssh-termux backend requires passwordless SSH access to an Android
+device running [Termux](https://termux.dev/) with
+[Termux:API](https://wiki.termux.com/wiki/Termux:API) installed. Here's
+the setup from scratch.
+
+**On the phone (Termux):**
+
+```sh
+# Install the SSH server and media player
+pkg install openssh termux-api
+
+# Start sshd (listens on port 8022 by default)
+sshd
+
+# Check your username — Termux uses a non-standard one
+whoami
+# Typically: u0_a317 or similar
+```
+
+**On the host (your server):**
+
+```sh
+# Copy your SSH key to the phone
+# Replace <phone-ip> and <termux-user> with your values
+ssh-copy-id -p 8022 <termux-user>@<phone-ip>
+
+# Verify passwordless login works
+ssh -p 8022 <termux-user>@<phone-ip> echo ok
+```
+
+**Create an SSH alias** in `~/.ssh/config` so the relay can connect by
+name:
+
+```sshconfig
+Host phone
+  HostName <phone-ip>
+  Port 8022
+  User <termux-user>
+```
+
+Then test end-to-end:
+
+```sh
+# Verify termux-media-player works
+ssh phone termux-media-player info
+
+# Set the relay to use your alias
+export RELAY_SSH_HOST=phone
+```
+
+**Recommended: ControlMaster** for low-latency repeated connections.
+Without it, every SCP + play cycle opens two new SSH connections. With
+it, subsequent connections reuse the first one:
+
+```sshconfig
+Host phone
+  HostName <phone-ip>
+  Port 8022
+  User <termux-user>
+  ControlMaster auto
+  ControlPath ~/.ssh/sockets/%r@%h-%p
+  ControlPersist 600
+```
+
+```sh
+mkdir -p ~/.ssh/sockets
+```
+
+**Tailscale** works well if the phone and server are on different
+networks. The phone's Tailscale IP is stable, so the SSH alias doesn't
+break when you move between Wi-Fi and mobile data.
+
+**Troubleshooting:**
+
+- `PLAY:FAILED (ssh)` — check `ssh phone echo ok` works non-interactively
+- `PLAY:FAILED (scp)` — check disk space on the phone (`df -h` in Termux)
+- Audio plays but is silent — check phone volume; `termux-volume` can help
+- `termux-media-player: command not found` — install `termux-api` package
+  *and* the Termux:API Android app from F-Droid
+
 ### mpv
 
 Plays audio locally via mpv. Supports direct invocation (spawns mpv per
