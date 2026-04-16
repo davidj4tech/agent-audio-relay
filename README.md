@@ -2,11 +2,12 @@
 
 Deliver coding-agent TTS audio to your phone. A watcher daemon monitors
 directories for new audio files and plays them on your phone via SSH +
-`termux-media-player`. Hook scripts generate speech from Claude Code,
-OpenCode (Codex), and Home Assistant agent responses using Edge TTS.
+`termux-media-player`. Hook scripts generate speech from Claude Code, Codex,
+OpenCode, and Home Assistant agent responses using Edge TTS.
 
 ```
 Claude Code ─(Stop hook)──► /tmp/tts-claude/voice-*.mp3
+Codex       ─(stdin hook)─► /tmp/tts-codex/voice-*.mp3
 OpenCode    ─(poll loop)──► /tmp/tts-opencode/voice-*.mp3
 HA/openclaw ─(SSE stream)─► /tmp/openclaw/tts-ha/voice-*.opus
                                     │
@@ -91,7 +92,24 @@ Then add to `~/.claude/settings.json`:
 | `CLAUDE_TTS_VOICE` | `en-US-AriaNeural` | Edge TTS voice |
 | `CLAUDE_TTS_DROP_DIR` | `/tmp/tts-claude` | Audio drop directory |
 
-### OpenCode (Codex) hook
+### Codex hook
+
+Shell script for the OpenAI Codex CLI. Codex pipes the assistant response
+text into the hook on stdin; the hook strips markdown, generates Edge TTS
+audio, and drops it for the watcher.
+
+```sh
+cp hooks/codex-tts-hook.sh ~/.codex/codex-tts-hook.sh
+chmod +x ~/.codex/codex-tts-hook.sh
+```
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CODEX_TTS_ENABLED` | `1` | Set to `0` to disable |
+| `CODEX_TTS_VOICE` | `en-US-AriaNeural` | Edge TTS voice |
+| `CODEX_TTS_DROP_DIR` | `/tmp/tts-codex` | Audio drop directory |
+
+### OpenCode hook
 
 Long-running watcher that polls OpenCode sessions for new `final_answer`
 messages. Run as a systemd service alongside the main watcher.
@@ -146,7 +164,7 @@ systemctl --user enable --now opencode-tts-watcher
 
 ## How it works
 
-1. A coding agent (Claude Code, OpenCode, HA/openclaw) finishes responding
+1. A coding agent (Claude Code, Codex, OpenCode, HA/openclaw) finishes responding
 2. Its hook generates Edge TTS audio and drops it as `tts-<tool>/voice-<timestamp>.mp3`
 3. The watcher daemon detects the new file via inotifywait
 4. It copies the file into a queue, pads 1s of silence with ffmpeg

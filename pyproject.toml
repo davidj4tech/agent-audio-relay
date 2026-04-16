@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "agent-audio-relay"
 version = "0.1.0"
-description = "Deliver coding-agent TTS audio to your phone — watcher daemon + hooks for Claude Code, OpenCode, and Home Assistant"
+description = "Deliver coding-agent TTS audio to your phone — watcher daemon + hooks for Claude Code, Codex, OpenCode, and Home Assistant"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.9"
