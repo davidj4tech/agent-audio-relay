@@ -54,10 +54,49 @@ agent-audio-relay
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `RELAY_BACKEND` | `ssh-termux` | Playback backend (`ssh-termux` or `mpv`) |
+| `RELAY_BACKEND` | `ssh-termux` | Default selector — bare backend or `backend:target` |
+| `RELAY_CONTROL_FILE` | `/tmp/agent-audio-relay-backend` | Control file used by `switch` |
+| `RELAY_PROFILES_FILE` | `~/.config/agent-audio-relay/profiles.json` | Alias map |
 | `RELAY_WATCH_DIRS` | `/tmp/openclaw:/tmp` | Colon-separated dirs to watch |
 | `RELAY_QUEUE_DIR` | `/tmp/agent-audio-relay-queue` | Local queue directory |
 | `RELAY_PAD_SILENCE` | `1` | Pad 1s silence onto audio (`1` or `0`) |
+
+### Switching targets on the fly
+
+The daemon resolves its selector per audio file, so you can change
+backend or output target from another shell without restarting:
+
+```sh
+agent-audio-relay switch mpv                         # whole-backend switch
+agent-audio-relay switch ssh-termux:AA:BB:CC:DD:EE:FF # backend + target
+agent-audio-relay switch headphones                  # alias from profiles.json
+agent-audio-relay status                             # shows the active selector
+agent-audio-relay list                               # prints backends + aliases
+```
+
+A selector has the form `<backend>[:<target>]` where `<target>` is
+backend-specific — a BT MAC address for `ssh-termux` (requires
+`RELAY_TERMUX_SWITCH_CMD` to actually reroute; see below), or a PipeWire
+sink name for `mpv` (mapped to `--audio-device=pulse/<target>`).
+
+### Aliases (`profiles.json`)
+
+Define friendly names for selectors in
+`~/.config/agent-audio-relay/profiles.json`:
+
+```json
+{
+  "aliases": {
+    "headphones": { "backend": "ssh-termux", "target": "AA:BB:CC:DD:EE:FF" },
+    "car":        { "backend": "ssh-termux", "target": "11:22:33:44:55:66" },
+    "speaker":    { "backend": "mpv",        "target": "bluez_sink.XX_XX_XX_XX_XX_XX.a2dp_sink" },
+    "local":      { "backend": "mpv" },
+    "phone":      { "backend": "ssh-termux" }
+  }
+}
+```
+
+See `examples/profiles.json` for a starter.
 
 ## Playback backends
 
@@ -72,6 +111,35 @@ original backend — designed for Android phones running Termux over SSH.
 | `RELAY_SSH_DEST` | `.cache/relay-latest` | Remote path prefix for audio |
 | `RELAY_SSH_MAX_RETRIES` | `2` | Retry count for SCP/play |
 | `RELAY_SSH_PLAYBACK_WAIT` | `120` | Max seconds to wait for playback |
+| `RELAY_TERMUX_SWITCH_CMD` | *(empty)* | Remote command run before playing when the target changes — the target is appended as a shell-quoted arg. Unset means no reroute. |
+
+#### Bluetooth target switching
+
+Android doesn't expose a stable API for picking the active A2DP device
+from Termux, so the relay delegates the actual routing to a user-supplied
+command. Set `RELAY_TERMUX_SWITCH_CMD` to a shell invocation on the phone
+that, when passed a target identifier as its last argument, makes that
+device the active media sink. The target string is opaque to the relay —
+it can be a MAC address, a Tasker task name, whatever your switch script
+understands.
+
+Rough examples (pick what fits your phone):
+
+```sh
+# Rooted phone — cmd bluetooth_manager connect to a MAC
+export RELAY_TERMUX_SWITCH_CMD='su -c "cmd bluetooth_manager connect"'
+
+# Tasker (AutoRemote / EventGhost-style) — fire an intent per target
+export RELAY_TERMUX_SWITCH_CMD='am broadcast -a net.dinglisch.android.tasker.ACTION_TASK -e task_name BTSwitch --es par1'
+
+# Your own wrapper on the phone
+export RELAY_TERMUX_SWITCH_CMD='~/bin/bt-switch'
+```
+
+`switch` logs `BT:SWITCH <target>` on success, `BT:FAIL …` on a non-zero
+exit, and `BT:SKIPPED (no RELAY_TERMUX_SWITCH_CMD configured)` when a
+target was selected but no command is set — in which case playback still
+goes to whichever device Android currently considers active.
 
 #### SSH setup for Termux
 

@@ -1,0 +1,22 @@
+{
+  "aliases": {
+    "headphones": {
+      "backend": "ssh-termux",
+      "target": "AA:BB:CC:DD:EE:FF"
+    },
+    "car": {
+      "backend": "ssh-termux",
+      "target": "11:22:33:44:55:66"
+    },
+    "speaker": {
+      "backend": "mpv",
+      "target": "bluez_sink.XX_XX_XX_XX_XX_XX.a2dp_sink"
+    },
+    "local": {
+      "backend": "mpv"
+    },
+    "phone": {
+      "backend": "ssh-termux"
+    }
+  }
+}

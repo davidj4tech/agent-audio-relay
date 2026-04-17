@@ -1,52 +1,123 @@
-"""Backend registry — resolves backend name to an implementation.
+"""Backend registry — resolves a selector (control file / env / alias) to a
+(backend-name, optional target) pair and instantiates the backend.
 
-Name resolution order:
-    1. Control file at $RELAY_CONTROL_FILE (default /tmp/agent-audio-relay-backend),
-       if present and non-empty. Lets `agent-audio-relay switch <name>` flip the
-       active backend without restarting the watcher.
+Selector forms accepted by `parse_selector`:
+    mpv                     → ("mpv", None)
+    ssh-termux              → ("ssh-termux", None)
+    ssh-termux:AA:BB:CC:..  → ("ssh-termux", "AA:BB:CC:..")
+    mpv:bluez_sink.x.a2dp   → ("mpv", "bluez_sink.x.a2dp_sink")
+    <alias>                 → resolved via profiles.json (see load_profiles)
+
+Name resolution for the *active* selector (used by the watcher loop):
+    1. Control file at $RELAY_CONTROL_FILE (default /tmp/agent-audio-relay-backend).
     2. $RELAY_BACKEND env var.
-    3. Default: ssh-termux.
+    3. DEFAULT_BACKEND.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
+from typing import Tuple
 
 from .base import PlaybackBackend
 
 KNOWN_BACKENDS = ("ssh-termux", "mpv")
 DEFAULT_BACKEND = "ssh-termux"
 CONTROL_FILE = Path(os.environ.get("RELAY_CONTROL_FILE", "/tmp/agent-audio-relay-backend"))
+PROFILES_FILE = Path(
+    os.environ.get(
+        "RELAY_PROFILES_FILE",
+        str(Path.home() / ".config" / "agent-audio-relay" / "profiles.json"),
+    )
+)
+
+Selector = Tuple[str, "str | None"]
+
+_profiles_warned = False
+
+
+def load_profiles() -> dict[str, Selector]:
+    """Return {alias: (backend, target)} from PROFILES_FILE, or {} if absent/invalid."""
+    global _profiles_warned
+    if not PROFILES_FILE.exists():
+        return {}
+    try:
+        data = json.loads(PROFILES_FILE.read_text())
+        aliases_raw = data.get("aliases", {})
+        out: dict[str, Selector] = {}
+        for alias, entry in aliases_raw.items():
+            backend = entry.get("backend")
+            if backend not in KNOWN_BACKENDS:
+                continue
+            target = entry.get("target") or None
+            out[alias] = (backend, target)
+        return out
+    except (OSError, ValueError, AttributeError):
+        if not _profiles_warned:
+            print(f"agent-audio-relay: PROFILES:INVALID ({PROFILES_FILE})", file=sys.stderr)
+            _profiles_warned = True
+        return {}
+
+
+def parse_selector(token: str) -> Selector | None:
+    """Parse a selector string. Returns None if unrecognized."""
+    token = token.strip()
+    if not token:
+        return None
+
+    aliases = load_profiles()
+    if token in aliases:
+        return aliases[token]
+
+    if ":" in token:
+        backend, _, target = token.partition(":")
+        backend = backend.lower().strip()
+        target = target.strip() or None
+        if backend in KNOWN_BACKENDS:
+            return (backend, target)
+        return None
+
+    lowered = token.lower()
+    if lowered in KNOWN_BACKENDS:
+        return (lowered, None)
+    return None
+
+
+def resolve_selector() -> Selector:
+    """Return the currently-active (backend, target). Control file > env > default."""
+    try:
+        if CONTROL_FILE.exists():
+            raw = CONTROL_FILE.read_text().strip()
+            if raw:
+                parsed = parse_selector(raw)
+                if parsed is not None:
+                    return parsed
+    except OSError:
+        pass
+
+    env = os.environ.get("RELAY_BACKEND", DEFAULT_BACKEND)
+    parsed = parse_selector(env)
+    if parsed is not None:
+        return parsed
+    return (DEFAULT_BACKEND, None)
 
 
 def resolve_backend_name() -> str:
-    """Return the currently-selected backend name.
-
-    Reads the control file first so on-the-fly switches take effect; falls back
-    to RELAY_BACKEND, then DEFAULT_BACKEND. Unknown names fall back to the env
-    default rather than crashing the watcher mid-loop.
-    """
-    try:
-        if CONTROL_FILE.exists():
-            name = CONTROL_FILE.read_text().strip().lower()
-            if name in KNOWN_BACKENDS:
-                return name
-    except OSError:
-        pass
-    name = os.environ.get("RELAY_BACKEND", DEFAULT_BACKEND).lower().strip()
-    return name if name in KNOWN_BACKENDS else DEFAULT_BACKEND
+    """Back-compat helper — returns only the backend name."""
+    return resolve_selector()[0]
 
 
-def build_backend(name: str) -> PlaybackBackend:
-    """Instantiate a backend by name."""
+def build_backend(name: str, target: str | None = None) -> PlaybackBackend:
+    """Instantiate a backend by name, optionally with a target."""
     if name == "ssh-termux":
         from .ssh_termux import SshTermuxBackend
-        return SshTermuxBackend()
+        return SshTermuxBackend(target=target)
     if name == "mpv":
         from .mpv import MpvBackend
-        return MpvBackend()
+        return MpvBackend(target=target)
     print(f"error: unknown backend {name!r}. Options: {', '.join(KNOWN_BACKENDS)}",
           file=sys.stderr)
     sys.exit(1)
@@ -54,4 +125,5 @@ def build_backend(name: str) -> PlaybackBackend:
 
 def get_backend() -> PlaybackBackend:
     """Return the currently-configured playback backend."""
-    return build_backend(resolve_backend_name())
+    name, target = resolve_selector()
+    return build_backend(name, target)

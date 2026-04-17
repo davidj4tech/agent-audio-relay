@@ -26,12 +26,17 @@ from .base import PlaybackBackend
 class MpvBackend(PlaybackBackend):
     name = "mpv"
 
-    def __init__(self) -> None:
+    def __init__(self, target: str | None = None) -> None:
         self.bin = os.environ.get("RELAY_MPV_BIN", "mpv")
         self.ipc_socket = os.environ.get("RELAY_MPV_SOCKET", "")
         self.extra_args = os.environ.get("RELAY_MPV_ARGS", "").split() if os.environ.get("RELAY_MPV_ARGS") else []
         self.wait = os.environ.get("RELAY_MPV_WAIT", "1") == "1"
+        self.target = target
         self._proc: subprocess.Popen | None = None
+
+        if target and not any(a.startswith("--audio-device") for a in self.extra_args):
+            device = target if "/" in target else f"pulse/{target}"
+            self.extra_args = [*self.extra_args, f"--audio-device={device}"]
 
     def _send_ipc(self, command: list) -> dict | None:
         """Send a JSON IPC command to a running mpv instance."""
@@ -87,6 +92,7 @@ class MpvBackend(PlaybackBackend):
             return False
 
     def describe(self) -> str:
+        suffix = f" → {self.target}" if self.target else ""
         if self.ipc_socket:
-            return f"mpv (IPC: {self.ipc_socket})"
-        return f"mpv ({self.bin})"
+            return f"mpv (IPC: {self.ipc_socket}{suffix})"
+        return f"mpv ({self.bin}{suffix})"

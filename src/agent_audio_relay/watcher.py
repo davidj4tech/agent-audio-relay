@@ -4,24 +4,33 @@ Watches directories for new audio files (mp3/opus/ogg/wav) via inotifywait,
 queues them, pads 1s of silence (avoids Edge TTS last-word clipping), and
 delivers them through the configured playback backend.
 
-The active backend is resolved per file, so `agent-audio-relay switch <name>`
-from another shell takes effect on the next queued audio without restarting
-the daemon.
+The active backend + target are resolved per file, so `agent-audio-relay
+switch <name>` from another shell takes effect on the next queued audio
+without restarting the daemon.
+
+Selectors accepted by `switch`:
+    <backend>                   e.g. mpv, ssh-termux
+    <backend>:<target>          e.g. ssh-termux:AA:BB:CC:DD:EE:FF,
+                                     mpv:bluez_sink.XX.a2dp_sink
+    <alias>                     name defined in profiles.json
 
 Environment variables:
-    RELAY_BACKEND           Playback backend: ssh-termux, mpv (default: ssh-termux)
-    RELAY_CONTROL_FILE      Control file for on-the-fly backend switching
-                            (default: /tmp/agent-audio-relay-backend)
+    RELAY_BACKEND           Default selector (backend or backend:target) — used
+                            when the control file is empty (default: ssh-termux)
+    RELAY_CONTROL_FILE      Control file (default: /tmp/agent-audio-relay-backend)
+    RELAY_PROFILES_FILE     Alias map (default: ~/.config/agent-audio-relay/profiles.json)
     RELAY_WATCH_DIRS        Colon-separated dirs to watch (default: /tmp/openclaw:/tmp)
     RELAY_QUEUE_DIR         Local queue directory (default: /tmp/agent-audio-relay-queue)
     RELAY_PAD_SILENCE       Pad 1s silence onto audio files: 1 or 0 (default: 1)
 
 Subcommands:
     agent-audio-relay                   Run the watcher (default).
-    agent-audio-relay switch <name>     Flip the active backend via control file.
-    agent-audio-relay status            Print the currently-selected backend name.
+    agent-audio-relay switch <sel>      Flip the active selector via control file.
+    agent-audio-relay status            Print the current selector.
+    agent-audio-relay list              Print known backends and configured aliases.
 
-See backend modules for backend-specific env vars.
+See backend modules for backend-specific env vars (including the BT-switch
+hook `RELAY_TERMUX_SWITCH_CMD` used by the ssh-termux backend).
 """
 
 from __future__ import annotations
@@ -38,8 +47,11 @@ from .backends import PlaybackBackend
 from .backends.registry import (
     CONTROL_FILE,
     KNOWN_BACKENDS,
+    PROFILES_FILE,
     build_backend,
-    resolve_backend_name,
+    load_profiles,
+    parse_selector,
+    resolve_selector,
 )
 
 WATCH_DIRS = os.environ.get("RELAY_WATCH_DIRS", "/tmp/openclaw:/tmp").split(":")
@@ -147,26 +159,50 @@ def trim_state() -> None:
         STATE_FILE.write_text("\n".join(lines[-50:]) + "\n")
 
 
-def cmd_switch(name: str) -> int:
-    name = name.lower().strip()
-    if name not in KNOWN_BACKENDS:
+def _format_selector(backend: str, target: str | None) -> str:
+    return f"{backend}:{target}" if target else backend
+
+
+def cmd_switch(arg: str) -> int:
+    parsed = parse_selector(arg)
+    if parsed is None:
+        aliases = load_profiles()
+        known = list(KNOWN_BACKENDS) + [f"{b}:<target>" for b in KNOWN_BACKENDS]
+        if aliases:
+            known += [f"alias:{a}" for a in aliases]
         print(
-            f"error: unknown backend {name!r}. Options: {', '.join(KNOWN_BACKENDS)}",
+            f"error: unrecognized selector {arg!r}. Options: {', '.join(known)}",
             file=sys.stderr,
         )
         return 2
+    backend, target = parsed
     CONTROL_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = CONTROL_FILE.with_suffix(CONTROL_FILE.suffix + ".tmp")
-    tmp.write_text(name + "\n")
+    tmp.write_text(_format_selector(backend, target) + "\n")
     tmp.replace(CONTROL_FILE)
-    print(f"switched to {name} ({CONTROL_FILE})")
+    print(f"switched to {_format_selector(backend, target)} ({CONTROL_FILE})")
     return 0
 
 
 def cmd_status() -> int:
-    name = resolve_backend_name()
+    backend, target = resolve_selector()
     source = "control-file" if CONTROL_FILE.exists() and CONTROL_FILE.read_text().strip() else "env-default"
-    print(f"{name} ({source})")
+    print(f"{_format_selector(backend, target)} ({source})")
+    return 0
+
+
+def cmd_list() -> int:
+    print("backends:")
+    for b in KNOWN_BACKENDS:
+        print(f"  {b}")
+    aliases = load_profiles()
+    print(f"aliases ({PROFILES_FILE}):")
+    if not aliases:
+        print("  (none)")
+    else:
+        width = max(len(a) for a in aliases)
+        for alias, (backend, target) in sorted(aliases.items()):
+            print(f"  {alias:<{width}}  -> {_format_selector(backend, target)}")
     return 0
 
 
@@ -177,23 +213,26 @@ def watch() -> None:
     for d in WATCH_DIRS:
         Path(d).mkdir(parents=True, exist_ok=True)
 
-    cache: dict[str, PlaybackBackend] = {}
-    current = [""]
+    cache: dict[tuple[str, str | None], PlaybackBackend] = {}
+    current: list[tuple[str, str | None] | None] = [None]
 
     def resolve() -> PlaybackBackend:
-        name = resolve_backend_name()
-        if name not in cache:
-            cache[name] = build_backend(name)
-        if name != current[0]:
-            if current[0]:
-                log(f"BACKEND:SWITCH {current[0]} -> {name}")
-            current[0] = name
-        return cache[name]
+        sel = resolve_selector()
+        if sel not in cache:
+            cache[sel] = build_backend(*sel)
+        if sel != current[0]:
+            if current[0] is not None:
+                log(
+                    f"BACKEND:SWITCH {_format_selector(*current[0])} -> "
+                    f"{_format_selector(*sel)}"
+                )
+            current[0] = sel
+        return cache[sel]
 
     initial = resolve()
     log(
         f"Watcher started (dirs={WATCH_DIRS}, backend={initial.describe()}, "
-        f"control={CONTROL_FILE})"
+        f"control={CONTROL_FILE}, profiles={PROFILES_FILE})"
     )
 
     try:
@@ -222,14 +261,16 @@ def main() -> None:
     argv = sys.argv[1:]
     if argv and argv[0] == "switch":
         if len(argv) != 2:
-            print("usage: agent-audio-relay switch <backend>", file=sys.stderr)
+            print("usage: agent-audio-relay switch <selector>", file=sys.stderr)
             sys.exit(2)
         sys.exit(cmd_switch(argv[1]))
     if argv and argv[0] == "status":
         sys.exit(cmd_status())
+    if argv and argv[0] == "list":
+        sys.exit(cmd_list())
     if argv and argv[0] not in ("watch",):
         print(
-            "usage: agent-audio-relay [watch | switch <backend> | status]",
+            "usage: agent-audio-relay [watch | switch <selector> | status | list]",
             file=sys.stderr,
         )
         sys.exit(2)
