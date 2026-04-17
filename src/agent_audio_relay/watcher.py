@@ -4,11 +4,22 @@ Watches directories for new audio files (mp3/opus/ogg/wav) via inotifywait,
 queues them, pads 1s of silence (avoids Edge TTS last-word clipping), and
 delivers them through the configured playback backend.
 
+The active backend is resolved per file, so `agent-audio-relay switch <name>`
+from another shell takes effect on the next queued audio without restarting
+the daemon.
+
 Environment variables:
     RELAY_BACKEND           Playback backend: ssh-termux, mpv (default: ssh-termux)
+    RELAY_CONTROL_FILE      Control file for on-the-fly backend switching
+                            (default: /tmp/agent-audio-relay-backend)
     RELAY_WATCH_DIRS        Colon-separated dirs to watch (default: /tmp/openclaw:/tmp)
     RELAY_QUEUE_DIR         Local queue directory (default: /tmp/agent-audio-relay-queue)
     RELAY_PAD_SILENCE       Pad 1s silence onto audio files: 1 or 0 (default: 1)
+
+Subcommands:
+    agent-audio-relay                   Run the watcher (default).
+    agent-audio-relay switch <name>     Flip the active backend via control file.
+    agent-audio-relay status            Print the currently-selected backend name.
 
 See backend modules for backend-specific env vars.
 """
@@ -21,8 +32,15 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Callable
 
-from .backends import get_backend, PlaybackBackend
+from .backends import PlaybackBackend
+from .backends.registry import (
+    CONTROL_FILE,
+    KNOWN_BACKENDS,
+    build_backend,
+    resolve_backend_name,
+)
 
 WATCH_DIRS = os.environ.get("RELAY_WATCH_DIRS", "/tmp/openclaw:/tmp").split(":")
 QUEUE_DIR = Path(os.environ.get("RELAY_QUEUE_DIR", "/tmp/agent-audio-relay-queue"))
@@ -76,15 +94,16 @@ def pad_audio(path: Path) -> None:
         padded.unlink(missing_ok=True)
 
 
-def process_queue(backend: PlaybackBackend) -> None:
-    """Deliver all queued files in order."""
+def process_queue(resolve: Callable[[], PlaybackBackend]) -> None:
+    """Deliver all queued files in order, resolving the backend per file."""
     for queued in sorted(QUEUE_DIR.iterdir()):
         if not queued.is_file():
             continue
+        backend = resolve()
         backend.wait_for_playback()
         pad_audio(queued)
         ok = backend.play(queued)
-        log(f"{'PLAY:OK' if ok else 'PLAY:FAILED'} ({queued.name})")
+        log(f"{'PLAY:OK' if ok else 'PLAY:FAILED'} ({queued.name}) via {backend.name}")
         queued.unlink(missing_ok=True)
 
 
@@ -128,16 +147,54 @@ def trim_state() -> None:
         STATE_FILE.write_text("\n".join(lines[-50:]) + "\n")
 
 
-def main() -> None:
-    backend = get_backend()
+def cmd_switch(name: str) -> int:
+    name = name.lower().strip()
+    if name not in KNOWN_BACKENDS:
+        print(
+            f"error: unknown backend {name!r}. Options: {', '.join(KNOWN_BACKENDS)}",
+            file=sys.stderr,
+        )
+        return 2
+    CONTROL_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = CONTROL_FILE.with_suffix(CONTROL_FILE.suffix + ".tmp")
+    tmp.write_text(name + "\n")
+    tmp.replace(CONTROL_FILE)
+    print(f"switched to {name} ({CONTROL_FILE})")
+    return 0
 
+
+def cmd_status() -> int:
+    name = resolve_backend_name()
+    source = "control-file" if CONTROL_FILE.exists() and CONTROL_FILE.read_text().strip() else "env-default"
+    print(f"{name} ({source})")
+    return 0
+
+
+def watch() -> None:
     QUEUE_DIR.mkdir(parents=True, exist_ok=True)
     STATE_FILE.touch(exist_ok=True)
 
     for d in WATCH_DIRS:
         Path(d).mkdir(parents=True, exist_ok=True)
 
-    log(f"Watcher started (dirs={WATCH_DIRS}, backend={backend.describe()})")
+    cache: dict[str, PlaybackBackend] = {}
+    current = [""]
+
+    def resolve() -> PlaybackBackend:
+        name = resolve_backend_name()
+        if name not in cache:
+            cache[name] = build_backend(name)
+        if name != current[0]:
+            if current[0]:
+                log(f"BACKEND:SWITCH {current[0]} -> {name}")
+            current[0] = name
+        return cache[name]
+
+    initial = resolve()
+    log(
+        f"Watcher started (dirs={WATCH_DIRS}, backend={initial.describe()}, "
+        f"control={CONTROL_FILE})"
+    )
 
     try:
         proc = subprocess.Popen(
@@ -157,8 +214,26 @@ def main() -> None:
         if "/tts-" not in filepath or "/voice-" not in filepath:
             continue
         enqueue_file(filepath)
-        process_queue(backend)
+        process_queue(resolve)
         trim_state()
+
+
+def main() -> None:
+    argv = sys.argv[1:]
+    if argv and argv[0] == "switch":
+        if len(argv) != 2:
+            print("usage: agent-audio-relay switch <backend>", file=sys.stderr)
+            sys.exit(2)
+        sys.exit(cmd_switch(argv[1]))
+    if argv and argv[0] == "status":
+        sys.exit(cmd_status())
+    if argv and argv[0] not in ("watch",):
+        print(
+            "usage: agent-audio-relay [watch | switch <backend> | status]",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    watch()
 
 
 if __name__ == "__main__":
