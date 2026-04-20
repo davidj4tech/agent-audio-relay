@@ -251,8 +251,9 @@ def watch() -> None:
     assert proc.stdout is not None
     for line in proc.stdout:
         filepath = line.strip()
-        # Only pick up files matching the tts-*/voice-* convention
-        if "/tts-" not in filepath or "/voice-" not in filepath:
+        # Only pick up files dropped into a tts-* directory
+        # (denote-named or legacy voice-<ns> — both accepted)
+        if "/tts-" not in filepath:
             continue
         enqueue_file(filepath)
         process_queue(resolve)
