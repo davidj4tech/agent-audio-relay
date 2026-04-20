@@ -13,6 +13,8 @@ Environment=RELAY_SSH_HOST=p8ar
 # Environment=RELAY_BACKEND=mpv
 # Environment=RELAY_MPV_SOCKET=/tmp/mpv-relay.sock
 Environment=RELAY_WATCH_DIRS=/tmp/openclaw:/tmp
+# Per-user queue dir so multiple OS users on one host don't collide on /tmp.
+Environment=RELAY_QUEUE_DIR=%t/agent-audio-relay-queue
 Restart=always
 RestartSec=5
 

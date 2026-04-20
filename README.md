@@ -40,11 +40,17 @@ pip install --user /path/to/agent-audio-relay
 
 ## Watcher daemon (core)
 
-The `agent-audio-relay` command watches directories for new
-`tts-*/voice-*` audio files, queues them, optionally pads 1s of silence
-(avoids Edge TTS last-word clipping), and delivers them through the
-configured playback backend. Back-to-back messages are sequenced — it
-waits for current playback to finish before starting the next.
+The `agent-audio-relay` command watches directories for new audio files
+(`mp3`/`opus`/`ogg`/`wav`) dropped into any `tts-*` subdirectory, queues
+them, optionally pads 1s of silence (avoids Edge TTS last-word
+clipping), and delivers them through the configured playback backend.
+Back-to-back messages are sequenced — it waits for current playback to
+finish before starting the next.
+
+Hooks name their clips with a denote-style stem
+(`YYYYMMDDTHHMMSS--<session>__<persona>_<agent>_<kind>.<ext>`) via the
+shared `hooks/lib/denote-stem.sh` helper, and the watcher preserves the
+original stem end-to-end so backends can archive and replay by identity.
 
 **Requirements:** `inotify-tools`, `ffmpeg` (for silence padding).
 
@@ -58,7 +64,7 @@ agent-audio-relay
 | `RELAY_CONTROL_FILE` | `/tmp/agent-audio-relay-backend` | Control file used by `switch` |
 | `RELAY_PROFILES_FILE` | `~/.config/agent-audio-relay/profiles.json` | Alias map |
 | `RELAY_WATCH_DIRS` | `/tmp/openclaw:/tmp` | Colon-separated dirs to watch |
-| `RELAY_QUEUE_DIR` | `/tmp/agent-audio-relay-queue` | Local queue directory |
+| `RELAY_QUEUE_DIR` | `/tmp/agent-audio-relay-queue` | Local queue directory (set to `$XDG_RUNTIME_DIR/agent-audio-relay-queue` under systemd to avoid cross-user `/tmp` collisions — see the shipped unit) |
 | `RELAY_PAD_SILENCE` | `1` | Pad 1s silence onto audio (`1` or `0`) |
 
 ### Switching targets on the fly
@@ -108,7 +114,6 @@ original backend — designed for Android phones running Termux over SSH.
 | Variable | Default | Meaning |
 |---|---|---|
 | `RELAY_SSH_HOST` | `p8ar` | SSH alias for the target device |
-| `RELAY_SSH_DEST` | `.cache/relay-latest` | Remote path prefix for audio |
 | `RELAY_SSH_MAX_RETRIES` | `2` | Retry count for SCP/play |
 | `RELAY_SSH_PLAYBACK_WAIT` | `120` | Max seconds to wait for playback |
 | `RELAY_TERMUX_SWITCH_CMD` | *(empty)* | Remote command run before playing when the target changes — the target is appended as a shell-quoted arg. Unset means no reroute. |
@@ -140,6 +145,15 @@ export RELAY_TERMUX_SWITCH_CMD='~/bin/bt-switch'
 exit, and `BT:SKIPPED (no RELAY_TERMUX_SWITCH_CMD configured)` when a
 target was selected but no command is set — in which case playback still
 goes to whichever device Android currently considers active.
+
+Clips are archived on the phone under `~/.cache/agent-audio/<stem>.<ext>`.
+The backend maintains three symlinks per clip:
+
+- `latest.<ext>` — global most-recent
+- `latest--<session>.<ext>` — most-recent from a given session
+- `latest--<session>__<agent>.<ext>` — session + agent scoped
+
+`bin/tts-ctl` uses those symlinks to implement session-aware replay.
 
 #### SSH setup for Termux
 
@@ -372,16 +386,34 @@ systemctl --user daemon-reload
 systemctl --user enable --now opencode-tts-watcher
 ```
 
+## Playback control
+
+`bin/tts-ctl` wraps `termux-media-player` over SSH for the `ssh-termux`
+backend:
+
+```sh
+tts-ctl pause            # pause current playback
+tts-ctl resume           # resume
+tts-ctl toggle           # pause/resume depending on state
+tts-ctl replay           # replay latest from the current tmux session
+                         #   (falls back to global latest)
+tts-ctl replay foo       # replay latest from session "foo"
+```
+
 ## Adding a new agent hook
 
 To add TTS for any new tool, write a script that:
 
 1. Detects when the tool finishes responding
 2. Extracts the response text
-3. Generates audio: `edge-tts --text "..." --write-media /tmp/tts-<tool>/voice-<timestamp>.mp3`
+3. Sources `hooks/lib/denote-stem.sh` and names the clip via
+   `make_stem <agent> <kind> [session_override]` so it carries
+   session/persona identity end-to-end
+4. Generates audio:
+   `edge-tts --text "..." --write-media "/tmp/tts-<tool>/$(make_stem <tool> <kind>).mp3"`
 
-The watcher picks it up automatically — any file matching `tts-*/voice-*`
-under a watched directory gets queued and delivered.
+The watcher picks up any supported audio file dropped into a `tts-*`
+subdirectory under a watched path.
 
 ## Adding a new playback backend
 
