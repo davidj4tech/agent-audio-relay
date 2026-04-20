@@ -110,7 +110,25 @@ class SshTermuxBackend(PlaybackBackend):
         ext = path.suffix.lstrip(".")
         name = original_name(path)
         archive = f".cache/agent-audio/{name}"
-        latest = f".cache/agent-audio/latest.{ext}"
+
+        # Build latest pointers: global + per-session (+ per-session__agent).
+        # Stem: YYYYMMDDTHHMMSS--<session>__<persona>_<agent>_<kind>
+        links = [f".cache/agent-audio/latest.{ext}"]
+        stem = Path(name).stem
+        if "--" in stem and "__" in stem:
+            try:
+                after_ts = stem.split("--", 1)[1]
+                session, rest = after_ts.split("__", 1)
+                parts = rest.split("_")
+                if session:
+                    links.append(f".cache/agent-audio/latest--{session}.{ext}")
+                    if len(parts) >= 3:
+                        agent = parts[-2]
+                        if agent:
+                            links.append(f".cache/agent-audio/latest--{session}__{agent}.{ext}")
+            except ValueError:
+                pass
+        ln_cmds = " && ".join(f"ln -sf '{name}' '{lnk}'" for lnk in links)
 
         for attempt in range(1, self.max_retries + 1):
             try:
@@ -120,7 +138,7 @@ class SshTermuxBackend(PlaybackBackend):
                      str(path), f"{self.host}:{archive}"],
                     check=True, capture_output=True, timeout=30,
                 )
-                self._ssh(f"ln -sf '{name}' '{latest}' && termux-media-player play '{archive}'")
+                self._ssh(f"{ln_cmds} && termux-media-player play '{archive}'")
                 return True
             except (subprocess.SubprocessError, OSError):
                 if attempt < self.max_retries:
