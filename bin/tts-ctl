@@ -1,0 +1,43 @@
+#!/bin/bash
+# TTS playback control — wraps termux-media-player commands on the phone.
+# Usage: tts-ctl pause | resume | replay [session] | toggle
+#
+# replay resolves target in this order:
+#   1. explicit [session] arg
+#   2. current tmux session name
+#   3. global latest
+PHONE_HOST="${CLAUDE_TTS_PHONE_HOST:-p8ar}"
+ARCHIVE_DIR="${CLAUDE_TTS_PHONE_ARCHIVE:-/data/data/com.termux/files/home/.cache/agent-audio}"
+EXT="${CLAUDE_TTS_EXT:-mp3}"
+
+slug() {
+    printf '%s' "$1" | tr -c 'A-Za-z0-9-' '-' | sed 's/-\+/-/g; s/^-//; s/-$//'
+}
+
+replay_target() {
+    local session="$1"
+    if [ -z "$session" ] && [ -n "$TMUX_PANE" ]; then
+        session=$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)
+    fi
+    if [ -n "$session" ]; then
+        local s
+        s=$(slug "$session")
+        local session_path="$ARCHIVE_DIR/latest--${s}.$EXT"
+        if ssh "$PHONE_HOST" "[ -e '$session_path' ]" 2>/dev/null; then
+            printf '%s' "$session_path"
+            return
+        fi
+    fi
+    printf '%s' "$ARCHIVE_DIR/latest.$EXT"
+}
+
+case "$1" in
+    pause)  ssh "$PHONE_HOST" "termux-media-player pause" ;;
+    resume) ssh "$PHONE_HOST" "termux-media-player play" ;;
+    replay)
+        target=$(replay_target "${2:-}")
+        ssh "$PHONE_HOST" "termux-media-player play '$target'"
+        ;;
+    toggle) ssh "$PHONE_HOST" "termux-media-player info | grep -qi playing && termux-media-player pause || termux-media-player play" ;;
+    *)      echo "Usage: tts-ctl pause|resume|replay [session]|toggle" >&2; exit 1 ;;
+esac
