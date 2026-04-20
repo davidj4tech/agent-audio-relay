@@ -24,6 +24,9 @@ DROP_DIR="${CODEX_TTS_DROP_DIR:-/tmp/tts-codex}"
 
 mkdir -p "$DROP_DIR"
 
+# shellcheck source=lib/denote-stem.sh
+. "$(dirname "$0")/lib/denote-stem.sh"
+
 input="$(cat)"
 [ -n "$input" ] || exit 0
 
@@ -42,6 +45,6 @@ clean="$(
 [ -n "$clean" ] || exit 0
 
 # Generate audio and drop into watched directory
-tmpfile="${DROP_DIR}/voice-$(date +%s%N).mp3"
+tmpfile="${DROP_DIR}/$(make_stem codex stop).mp3"
 "$EDGE_TTS" --text "$clean" --voice "$VOICE" --write-media "$tmpfile" >/dev/null 2>&1 || exit 0
 exit 0

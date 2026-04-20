@@ -25,7 +25,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from .base import PlaybackBackend
+from .base import PlaybackBackend, original_name
 
 
 class SshTermuxBackend(PlaybackBackend):
@@ -108,17 +108,19 @@ class SshTermuxBackend(PlaybackBackend):
     def play(self, path: Path) -> bool:
         self._maybe_switch_bt()
         ext = path.suffix.lstrip(".")
-        dest = f"{self.dest}.{ext}"
+        name = original_name(path)
+        archive = f".cache/agent-audio/{name}"
+        latest = f".cache/agent-audio/latest.{ext}"
 
         for attempt in range(1, self.max_retries + 1):
             try:
-                self._ssh("mkdir -p .cache")
+                self._ssh("mkdir -p .cache/agent-audio")
                 subprocess.run(
                     ["scp", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-                     str(path), f"{self.host}:{dest}"],
+                     str(path), f"{self.host}:{archive}"],
                     check=True, capture_output=True, timeout=30,
                 )
-                self._ssh(f"termux-media-player play '{dest}'")
+                self._ssh(f"ln -sf '{name}' '{latest}' && termux-media-player play '{archive}'")
                 return True
             except (subprocess.SubprocessError, OSError):
                 if attempt < self.max_retries:

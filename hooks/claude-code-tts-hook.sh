@@ -21,6 +21,9 @@ DROP_DIR="${CLAUDE_TTS_DROP_DIR:-/tmp/tts-claude}"
 
 mkdir -p "$DROP_DIR"
 
+# shellcheck source=lib/denote-stem.sh
+. "$(dirname "$0")/lib/denote-stem.sh"
+
 input=$(cat)
 
 # Handle Notification events (input prompts)
@@ -31,7 +34,22 @@ if [ -n "$notification_msg" ]; then
         [ -n "$session" ] && notification_msg="Session ${session}: ${notification_msg}"
     fi
 
-    tmpfile="${DROP_DIR}/voice-$(date +%s%N).mp3"
+    # Debounce: skip if another notification fired within 2 min, or a Stop
+    # played within 90 s (response audio is already on its way).
+    notif_stamp="/tmp/claude-tts-notif-last"
+    stop_stamp="/tmp/claude-tts-stop-last"
+    now=$(date +%s)
+    if [ -f "$notif_stamp" ]; then
+        last=$(cat "$notif_stamp" 2>/dev/null)
+        [ -n "$last" ] && [ $(( now - last )) -lt 120 ] && exit 0
+    fi
+    if [ -f "$stop_stamp" ]; then
+        last_stop=$(cat "$stop_stamp" 2>/dev/null)
+        [ -n "$last_stop" ] && [ $(( now - last_stop )) -lt 90 ] && exit 0
+    fi
+    echo "$now" > "$notif_stamp"
+
+    tmpfile="${DROP_DIR}/$(make_stem claude notif).mp3"
     "$EDGE_TTS" --text "$notification_msg" --voice "$VOICE" --write-media "$tmpfile" 2>/dev/null || exit 0
     exit 0
 fi
@@ -75,6 +93,7 @@ if [ -z "$clean" ]; then
 fi
 
 # Generate audio and drop into watched directory
-tmpfile="${DROP_DIR}/voice-$(date +%s%N).mp3"
+tmpfile="${DROP_DIR}/$(make_stem claude stop).mp3"
 "$EDGE_TTS" --text "$clean" --voice "$VOICE" --write-media "$tmpfile" 2>/dev/null || exit 0
+date +%s > /tmp/claude-tts-stop-last
 exit 0

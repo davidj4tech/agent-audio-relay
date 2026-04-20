@@ -27,9 +27,25 @@ class PlaybackBackend:
         """
 
     def play(self, path: Path) -> bool:
-        """Play an audio file. Returns True on success."""
+        """Play an audio file. Returns True on success.
+
+        The queued filename is `<ns>__<original-stem>.<ext>`. Backends that
+        archive or expose a 'latest' pointer for replay should strip the
+        `<ns>__` prefix via `original_name(path)` so the archived name
+        matches the hook's denote-style stem.
+        """
         raise NotImplementedError
 
     def describe(self) -> str:
         """Short human-readable description for log messages."""
         return self.name
+
+
+def original_name(path: Path) -> str:
+    """Strip the `<ns>__` queue prefix to recover the hook's filename."""
+    name = path.name
+    if "__" in name:
+        prefix, rest = name.split("__", 1)
+        if prefix.isdigit():
+            return rest
+    return name

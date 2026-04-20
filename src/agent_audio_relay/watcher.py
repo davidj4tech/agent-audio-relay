@@ -138,7 +138,9 @@ def enqueue_file(filepath: str) -> bool:
     except OSError:
         return False
 
-    queue_entry = QUEUE_DIR / f"{time.time_ns()}.{ext}"
+    # Preserve original stem so backends can archive/replay by name.
+    # Prepend ns to guarantee sort order even if two clips share a stem.
+    queue_entry = QUEUE_DIR / f"{time.time_ns()}__{src.name}"
     try:
         shutil.copy2(str(src), str(queue_entry))
         log(f"Queued: {filepath} -> {queue_entry.name}")

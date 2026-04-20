@@ -24,6 +24,9 @@ MAX_LENGTH=3750
 
 mkdir -p "$TTS_DIR"
 
+# shellcheck source=lib/denote-stem.sh
+. "$SCRIPT_DIR/lib/denote-stem.sh"
+
 log() {
   echo "[$(date -u '+%Y-%m-%d %H:%M:%S')] $*"
 }
@@ -65,7 +68,7 @@ except Exception:
       fi
 
       log "TTS: ${text:0:80}..."
-      outfile="$TTS_DIR/voice-$(date +%s%3N).opus"
+      outfile="$TTS_DIR/$(make_stem ha announce).opus"
       if "$EDGE_TTS" --voice "$VOICE" --text "$text" --write-media "$outfile" 2>/dev/null; then
         log "TTS:OK ($outfile)"
       else

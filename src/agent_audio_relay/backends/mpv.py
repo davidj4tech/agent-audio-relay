@@ -20,7 +20,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from .base import PlaybackBackend
+from .base import PlaybackBackend, original_name
 
 
 class MpvBackend(PlaybackBackend):
@@ -72,7 +72,26 @@ class MpvBackend(PlaybackBackend):
                 pass
             self._proc = None
 
+    def _update_latest(self, path: Path) -> None:
+        state_root = Path(os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")))
+        state = state_root / "agent-audio-relay"
+        state.mkdir(parents=True, exist_ok=True)
+        archive = state / original_name(path)
+        try:
+            if archive.resolve() != path.resolve():
+                import shutil as _shutil
+                _shutil.copy2(str(path), str(archive))
+        except OSError:
+            return
+        link = state / f"latest{path.suffix}"
+        link.unlink(missing_ok=True)
+        try:
+            link.symlink_to(archive.name)
+        except OSError:
+            pass
+
     def play(self, path: Path) -> bool:
+        self._update_latest(path)
         # IPC mode: load file into running mpv
         if self.ipc_socket:
             resp = self._send_ipc(["loadfile", str(path), "append-play"])

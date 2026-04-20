@@ -39,6 +39,9 @@ mkdir -p "$(dirname "$LOG_FILE")"
 touch "$STATE_FILE"
 touch "$LOG_FILE"
 
+# shellcheck source=lib/denote-stem.sh
+. "$(dirname "$0")/lib/denote-stem.sh"
+
 log() {
   local line
   line=$(printf '[%s] %s\n' "$(date -u '+%Y-%m-%d %H:%M:%S')" "$*")
@@ -124,6 +127,7 @@ seed_state() {
 
 enqueue_tts() {
   local text="$1"
+  local session_id="${2:-}"
   local clean tmpfile
 
   clean=$(strip_markdown "$text")
@@ -132,7 +136,7 @@ enqueue_tts() {
     return 0
   fi
 
-  tmpfile="${DROP_DIR}/voice-$(date +%s%N).mp3"
+  tmpfile="${DROP_DIR}/$(make_stem opencode stop "$session_id").mp3"
   if ! "$EDGE_TTS" --text "$clean" --voice "$VOICE" --write-media "$tmpfile" >/dev/null 2>&1; then
     log "edge-tts failed while generating audio"
     return 0
@@ -172,7 +176,7 @@ while true; do
     fi
 
     log "Speaking message $message_id from $session_id"
-    enqueue_tts "$text"
+    enqueue_tts "$text" "$session_id"
     state_set "$session_id" "$message_id"
   done
   shopt -u nullglob
