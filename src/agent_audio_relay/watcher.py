@@ -54,9 +54,10 @@ from .backends.registry import (
     resolve_selector,
 )
 
-WATCH_DIRS = os.environ.get("RELAY_WATCH_DIRS", "/tmp/openclaw:/tmp").split(":")
-QUEUE_DIR = Path(os.environ.get("RELAY_QUEUE_DIR", "/tmp/agent-audio-relay-queue"))
-STATE_FILE = Path("/tmp/agent-audio-relay-delivered.txt")
+_TMP = os.environ.get("TMPDIR", "/tmp")
+WATCH_DIRS = os.environ.get("RELAY_WATCH_DIRS", f"{_TMP}/openclaw:{_TMP}").split(":")
+QUEUE_DIR = Path(os.environ.get("RELAY_QUEUE_DIR", f"{_TMP}/agent-audio-relay-queue"))
+STATE_FILE = Path(os.environ.get("RELAY_STATE_FILE", f"{_TMP}/agent-audio-relay-delivered.txt"))
 PAD_SILENCE = os.environ.get("RELAY_PAD_SILENCE", "1") == "1"
 
 AUDIO_EXTS = {"mp3", "opus", "ogg", "wav"}
