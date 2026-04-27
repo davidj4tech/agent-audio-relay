@@ -302,8 +302,15 @@ Register in `~/.claude/settings.json`:
 | Variable | Default | Meaning |
 |---|---|---|
 | `CLAUDE_TTS_ENABLED` | `1` | Set to `0` to disable |
-| `CLAUDE_TTS_VOICE` | `en-US-AriaNeural` | Edge TTS voice |
+| `CLAUDE_TTS_ENGINE` | `edge` | TTS engine — `edge` (Microsoft Edge TTS, free) or `openai` (OpenAI TTS, paid, better voices) |
+| `CLAUDE_TTS_VOICE` | `en-US-AriaNeural` (edge) / `marin` (openai) | Voice name. Edge uses names like `en-US-AriaNeural`, `en-AU-NatashaNeural`; OpenAI uses `alloy`, `marin`, `sage`, `nova`, etc. |
 | `CLAUDE_TTS_DROP_DIR` | `/tmp/tts-claude` | Audio drop directory |
+| `CLAUDE_TTS_OPENAI_MODEL` | `gpt-4o-mini-tts` | OpenAI TTS model (only used when engine=`openai`) |
+| `CLAUDE_TTS_OPENAI_PYTHON` | `python3` | Python interpreter with the `openai` package installed (only used when engine=`openai`) |
+
+When `CLAUDE_TTS_ENGINE=openai`, the hook needs `OPENAI_API_KEY` in its
+environment (set it via the `env` block on the hook entry in
+`~/.claude/settings.json`, or globally in your shell).
 
 ### Codex
 
@@ -373,17 +380,20 @@ the HA dependency for voice input with something lighter.
 ```sh
 mkdir -p ~/.config/systemd/user
 
+# Make sure user services keep running after logout / across reboots
+sudo loginctl enable-linger "$USER"
+
 # Main watcher
 cp systemd/agent-audio-relay.service ~/.config/systemd/user/
 # Edit RELAY_BACKEND and backend-specific vars as needed
 systemctl --user daemon-reload
-systemctl --user enable --now agent-audio-relay
+systemctl --user reenable --now agent-audio-relay
 
 # OpenCode watcher (optional)
 cp systemd/opencode-tts-watcher.service ~/.config/systemd/user/
 # Edit ExecStart to point at your hooks/ path
 systemctl --user daemon-reload
-systemctl --user enable --now opencode-tts-watcher
+systemctl --user reenable --now opencode-tts-watcher
 ```
 
 ## Playback control

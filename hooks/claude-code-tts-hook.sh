@@ -1,27 +1,72 @@
 #!/bin/bash
 # agent-audio-relay: Claude Code TTS hook
 #
-# Generates speech with edge-tts when Claude Code finishes responding (Stop event)
-# or receives a notification. Drops audio into a watched directory where the
+# Generates speech when Claude Code finishes responding (Stop event) or
+# receives a notification. Drops audio into a watched directory where the
 # agent-audio-relay watcher picks it up and delivers to the phone.
+#
+# Two TTS engines are supported, selected via CLAUDE_TTS_ENGINE:
+#   edge    (default) — Microsoft Edge TTS via the `edge-tts` CLI. Free, no API key.
+#   openai             — OpenAI TTS via the python `openai` SDK. Better voices, paid.
 #
 # Also handles Notification events (input prompts) — prefixes with session name
 # if running inside tmux.
 #
-# Requirements: edge-tts (pip/pipx), jq, tac
+# Requirements:
+#   common: jq, tac
+#   edge:   edge-tts (pip/pipx)
+#   openai: python3 with the `openai` package, OPENAI_API_KEY in the hook env
 #
 # Claude Code config (~/.claude/settings.json):
 #   Register as a Stop hook and optionally a Notification hook.
 
 [ "$CLAUDE_TTS_ENABLED" = "0" ] && exit 0
 
-EDGE_TTS="${RELAY_EDGE_TTS_BIN:-edge-tts}"
-VOICE="${CLAUDE_TTS_VOICE:-en-US-AriaNeural}"
+ENGINE="${CLAUDE_TTS_ENGINE:-edge}"
 DROP_DIR="${CLAUDE_TTS_DROP_DIR:-/tmp/tts-claude}"
 STAMP_DIR="${CLAUDE_TTS_STAMP_DIR:-${TMPDIR:-/tmp}}"
 mkdir -p "$STAMP_DIR" 2>/dev/null || true
-
 mkdir -p "$DROP_DIR"
+
+case "$ENGINE" in
+    edge)
+        EDGE_TTS="${RELAY_EDGE_TTS_BIN:-edge-tts}"
+        VOICE="${CLAUDE_TTS_VOICE:-en-US-AriaNeural}"
+        ;;
+    openai)
+        OPENAI_PYTHON="${CLAUDE_TTS_OPENAI_PYTHON:-python3}"
+        OPENAI_MODEL="${CLAUDE_TTS_OPENAI_MODEL:-gpt-4o-mini-tts}"
+        VOICE="${CLAUDE_TTS_VOICE:-marin}"
+        ;;
+    *)
+        echo "claude-code-tts-hook: unknown CLAUDE_TTS_ENGINE='$ENGINE' (expected 'edge' or 'openai')" >&2
+        exit 0
+        ;;
+esac
+
+# tts_generate <text> <outfile>  — engine-agnostic; returns nonzero on failure.
+tts_generate() {
+    local text="$1" outfile="$2"
+    case "$ENGINE" in
+        edge)
+            "$EDGE_TTS" --text "$text" --voice "$VOICE" --write-media "$outfile" 2>/dev/null
+            ;;
+        openai)
+            TTS_TEXT="$text" TTS_OUTFILE="$outfile" TTS_MODEL="$OPENAI_MODEL" TTS_VOICE="$VOICE" \
+                "$OPENAI_PYTHON" - <<'PY' 2>/dev/null
+import os, sys
+from openai import OpenAI
+client = OpenAI()
+with client.audio.speech.with_streaming_response.create(
+    model=os.environ["TTS_MODEL"],
+    voice=os.environ["TTS_VOICE"],
+    input=os.environ["TTS_TEXT"],
+) as resp:
+    resp.stream_to_file(os.environ["TTS_OUTFILE"])
+PY
+            ;;
+    esac
+}
 
 # shellcheck source=lib/denote-stem.sh
 . "$(dirname "$0")/lib/denote-stem.sh"
@@ -52,7 +97,7 @@ if [ -n "$notification_msg" ]; then
     echo "$now" > "$notif_stamp"
 
     tmpfile="${DROP_DIR}/$(make_stem claude notif).mp3"
-    "$EDGE_TTS" --text "$notification_msg" --voice "$VOICE" --write-media "$tmpfile" 2>/dev/null || exit 0
+    tts_generate "$notification_msg" "$tmpfile" || exit 0
     exit 0
 fi
 
@@ -96,6 +141,6 @@ fi
 
 # Generate audio and drop into watched directory
 tmpfile="${DROP_DIR}/$(make_stem claude stop).mp3"
-"$EDGE_TTS" --text "$clean" --voice "$VOICE" --write-media "$tmpfile" 2>/dev/null || exit 0
+tts_generate "$clean" "$tmpfile" || exit 0
 date +%s > "$STAMP_DIR/claude-tts-stop-last"
 exit 0
