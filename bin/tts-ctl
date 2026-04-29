@@ -64,7 +64,17 @@ fmt_time() {
 case "${1:-}" in
     pause)   mpv_cmd '{"command":["set_property","pause",true]}'  >/dev/null ;;
     resume)  mpv_cmd '{"command":["set_property","pause",false]}' >/dev/null ;;
-    toggle)  mpv_cmd '{"command":["cycle","pause"]}'              >/dev/null ;;
+    toggle)
+        # If mpv is idle (no file loaded or playback finished), start the
+        # latest clip; otherwise just flip pause.
+        if [ "$(mpv_get idle-active)" = "true" ]; then
+            target=$(replay_target "${2:-}")
+            mpv_cmd "{\"command\":[\"loadfile\",\"$target\",\"replace\"]}" >/dev/null
+            mpv_cmd '{"command":["set_property","pause",false]}'           >/dev/null
+        else
+            mpv_cmd '{"command":["cycle","pause"]}' >/dev/null
+        fi
+        ;;
     replay)
         target=$(replay_target "${2:-}")
         mpv_cmd "{\"command\":[\"loadfile\",\"$target\",\"replace\"]}" >/dev/null
