@@ -1,0 +1,40 @@
+#!/bin/bash
+# Interactive tts-popup — meant to run inside `tmux display-popup -E`.
+# Talks to the mpv-tts daemon via tts-ctl. Single-key hotkeys:
+#   Space   toggle play/pause
+#   p       pause
+#   R       resume
+#   r       replay (current tmux session)
+#   h / l   seek -5s / +5s
+#   H / L   seek -30s / +30s
+#   - / =   volume -5 / +5
+#   q / Esc close
+set -u
+TTS_CTL="${TTS_CTL:-$HOME/.local/bin/tts-ctl}"
+
+draw() {
+    clear
+    printf 'TTS  %s\n' "$("$TTS_CTL" status 2>/dev/null)"
+    printf '\n'
+    printf '[Spc]togl  [p]ause  [R]esume\n'
+    printf '[r]eplay   [h/l]±5s [H/L]±30s\n'
+    printf '[-/=]vol   [q]uit\n'
+}
+
+while true; do
+    draw
+    IFS= read -r -s -n1 key || break
+    case "$key" in
+        ' ') "$TTS_CTL" toggle ;;
+        p)   "$TTS_CTL" pause  ;;
+        R)   "$TTS_CTL" resume ;;
+        r)   "$TTS_CTL" replay ;;
+        h)   "$TTS_CTL" seek -5  ;;
+        l)   "$TTS_CTL" seek 5   ;;
+        H)   "$TTS_CTL" seek -30 ;;
+        L)   "$TTS_CTL" seek 30  ;;
+        '-') "$TTS_CTL" volume -5 ;;
+        '=') "$TTS_CTL" volume 5  ;;
+        q|$'\e') exit 0 ;;
+    esac
+done

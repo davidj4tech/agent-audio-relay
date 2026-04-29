@@ -1,13 +1,24 @@
-"""SSH + termux-media-player playback backend.
+"""SSH + remote player playback backend.
 
 Delivers audio to a remote device (typically an Android phone running Termux)
-via SCP, then plays it with termux-media-player over SSH.
+via SCP, then plays it remotely. Two players are supported:
+
+  * `termux-media-player` (default) — fire-and-forget; no seek/volume.
+  * `mpv-ipc` — sends `loadfile` to a long-running mpv daemon's
+    JSON-IPC socket via `socat`. Required if you want `tts-ctl`/the
+    floating popup's seek/volume/status controls to talk to the same
+    audio you're hearing.
 
 Environment variables:
     RELAY_SSH_HOST              SSH alias for the target device (default: p8ar)
     RELAY_SSH_DEST              Remote path prefix for audio files (default: .cache/relay-latest)
     RELAY_SSH_MAX_RETRIES       Retry count for SCP/play (default: 2)
     RELAY_SSH_PLAYBACK_WAIT     Max seconds to wait for current playback (default: 120)
+    RELAY_TERMUX_PLAYER         `termux-media-player` (default) or `mpv-ipc`.
+    RELAY_TERMUX_MPV_SOCK       Remote path of the mpv IPC socket
+                                (default: $PREFIX/tmp/mpv-tts.sock,
+                                resolved on the phone as
+                                /data/data/com.termux/files/usr/tmp/mpv-tts.sock).
     RELAY_TERMUX_SWITCH_CMD     Remote command template invoked before playing when
                                 the selected target changes. The target is appended
                                 as a shell-quoted argument. Unset = no-op (audio
@@ -37,6 +48,11 @@ class SshTermuxBackend(PlaybackBackend):
         self.max_retries = int(os.environ.get("RELAY_SSH_MAX_RETRIES", "2"))
         self.max_wait = int(os.environ.get("RELAY_SSH_PLAYBACK_WAIT", "120"))
         self.switch_cmd = os.environ.get("RELAY_TERMUX_SWITCH_CMD", "").strip()
+        self.player = os.environ.get("RELAY_TERMUX_PLAYER", "termux-media-player").strip()
+        self.mpv_sock = os.environ.get(
+            "RELAY_TERMUX_MPV_SOCK",
+            "/data/data/com.termux/files/usr/tmp/mpv-tts.sock",
+        )
         self.target = target
         self._last_switched: str | None = None
 
@@ -54,9 +70,28 @@ class SshTermuxBackend(PlaybackBackend):
             return int(parts[0]) * 60 + int(parts[1])
         return 0
 
+    def _mpv_remote(self, json_payload: str) -> str:
+        """Run a one-shot mpv IPC command on the remote and return stdout."""
+        remote = (
+            f"printf '%s\\n' {shlex.quote(json_payload)}"
+            f" | socat - UNIX-CONNECT:{shlex.quote(self.mpv_sock)}"
+        )
+        try:
+            return self._ssh(remote).stdout
+        except (subprocess.SubprocessError, OSError):
+            return ""
+
     def wait_for_playback(self) -> None:
         waited = 0
         while waited < self.max_wait:
+            if self.player == "mpv-ipc":
+                resp = self._mpv_remote('{"command":["get_property","idle-active"]}')
+                if '"data":true' in resp or not resp:
+                    break
+                time.sleep(1)
+                waited += 1
+                continue
+
             try:
                 info = self._ssh("termux-media-player info").stdout
             except (subprocess.SubprocessError, OSError):
@@ -138,7 +173,23 @@ class SshTermuxBackend(PlaybackBackend):
                      str(path), f"{self.host}:{archive}"],
                     check=True, capture_output=True, timeout=30,
                 )
-                self._ssh(f"{ln_cmds} && termux-media-player play '{archive}'")
+                self._ssh(ln_cmds)
+                if self.player == "mpv-ipc":
+                    # Resolve $HOME on the phone — mpv loadfile needs an
+                    # absolute path. .cache/... is relative to ~ on Termux.
+                    abs_path = (
+                        "/data/data/com.termux/files/home/" + archive
+                    )
+                    payload = (
+                        '{"command":["loadfile",'
+                        f'"{abs_path}",'
+                        '"replace"]}'
+                    )
+                    self._mpv_remote(payload)
+                    # New file should start playing — make sure pause is off.
+                    self._mpv_remote('{"command":["set_property","pause",false]}')
+                else:
+                    self._ssh(f"termux-media-player play '{archive}'")
                 return True
             except (subprocess.SubprocessError, OSError):
                 if attempt < self.max_retries:
@@ -146,6 +197,7 @@ class SshTermuxBackend(PlaybackBackend):
         return False
 
     def describe(self) -> str:
+        player = self.player if self.player != "termux-media-player" else "tmp"
         if self.target:
-            return f"ssh-termux ({self.host} → {self.target})"
-        return f"ssh-termux ({self.host})"
+            return f"ssh-termux/{player} ({self.host} → {self.target})"
+        return f"ssh-termux/{player} ({self.host})"
