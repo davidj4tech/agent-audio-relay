@@ -422,6 +422,13 @@ Required on the phone: `mpv`, `socat`, `jq`, and an mpv daemon launched
 with `--input-ipc-server=$PREFIX/tmp/mpv-tts.sock --idle=yes`. Override
 the socket with `MPV_TTS_SOCK` if your daemon binds elsewhere.
 
+The companion project [mpv-mcp](https://github.com/davidj4tech/mpv-mcp)
+(Node, runs in Termux) provisions both `mpv` channels as runit services,
+exposes the same controls as an MCP server + HTTP/JSON API, and serves
+an installable PWA at `http://<tailscale-ip>:8765/` with mpv-style
+keyboard shortcuts. If you set `RELAY_TERMUX_PLAYER=mpv-ipc` on this
+relay, that's the phone-side daemon you're talking to.
+
 ### Floating tmux popup
 
 `bin/tts-popup` is an interactive single-key controller meant to run
