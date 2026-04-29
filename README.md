@@ -330,6 +330,36 @@ chmod +x ~/.codex/codex-tts-hook.sh
 | `CODEX_TTS_VOICE` | `en-US-AriaNeural` | Edge TTS voice |
 | `CODEX_TTS_DROP_DIR` | `/tmp/tts-codex` | Audio drop directory |
 
+### Pi (pi-coding-agent)
+
+[`pi`](https://github.com/badlogic/pi-mono) is a TypeScript coding-agent
+harness with a first-class extension API rather than a shell-hook config,
+so the integration is shipped as a TS extension instead of a shell
+script. It subscribes to the `agent_end` lifecycle event, extracts the
+final assistant text from `event.messages`, strips markdown, runs TTS,
+and drops the audio into a watched directory like the other hooks.
+Uses `fetch` directly for OpenAI TTS and spawns `edge-tts` for the
+optional Edge engine — no extra npm dependencies.
+
+```sh
+mkdir -p ~/.pi/agent/extensions
+cp extensions/pi-tts-extension.ts ~/.pi/agent/extensions/agent-audio-relay-tts.ts
+# Reload pi or start a new session.
+```
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PI_TTS_ENABLED` | `1` | Set to `0` to disable |
+| `PI_TTS_ENGINE` | `openai` | `openai` or `edge` |
+| `PI_TTS_VOICE` | `marin` (openai) / `en-US-AriaNeural` (edge) | Voice name |
+| `PI_TTS_OPENAI_MODEL` | `gpt-4o-mini-tts` | OpenAI TTS model |
+| `PI_TTS_EDGE_BIN` | `edge-tts` | Path to `edge-tts` (engine=edge) |
+| `PI_TTS_DROP_DIR` | `/tmp/tts-pi` | Audio drop directory |
+| `PI_TTS_MAX_CHARS` | `4000` | Cap on text length sent to TTS |
+
+When `PI_TTS_ENGINE=openai`, set `OPENAI_API_KEY` in the environment pi
+is launched from.
+
 ### OpenCode
 
 Long-running watcher that polls OpenCode sessions for new `final_answer`
