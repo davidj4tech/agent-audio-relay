@@ -20,7 +20,10 @@ Environment variables:
     RELAY_CONTROL_FILE      Control file (default: /tmp/agent-audio-relay-backend)
     RELAY_PROFILES_FILE     Alias map (default: ~/.config/agent-audio-relay/profiles.json)
     RELAY_WATCH_DIRS        Colon-separated dirs to watch (default: /tmp/openclaw:/tmp)
-    RELAY_QUEUE_DIR         Local queue directory (default: /tmp/agent-audio-relay-queue)
+    RELAY_QUEUE_DIR         Local queue directory (default: per-user under
+                            $XDG_RUNTIME_DIR/agent-audio-relay/queue, with
+                            fallbacks to $XDG_STATE_HOME or $TMPDIR/-<uid>)
+    RELAY_STATE_FILE        Dedup ledger (default: <state-root>/delivered.txt)
     RELAY_PAD_SILENCE       Pad 1s silence onto audio files: 1 or 0 (default: 1)
 
 Subcommands:
@@ -56,8 +59,32 @@ from .backends.registry import (
 
 _TMP = os.environ.get("TMPDIR", "/tmp")
 WATCH_DIRS = os.environ.get("RELAY_WATCH_DIRS", f"{_TMP}/openclaw:{_TMP}").split(":")
-QUEUE_DIR = Path(os.environ.get("RELAY_QUEUE_DIR", f"{_TMP}/agent-audio-relay-queue"))
-STATE_FILE = Path(os.environ.get("RELAY_STATE_FILE", f"{_TMP}/agent-audio-relay-delivered.txt"))
+
+
+def _per_user_state_root() -> Path:
+    """Per-user, writable directory for the relay's runtime state.
+
+    Avoids the multi-user collision footgun where two users running their
+    own relay would both default to a single canonical /tmp path; whoever
+    started first owned it and the other got EACCES on the first touch().
+
+    Preference order:
+      1. $XDG_RUNTIME_DIR (per-user, set by systemd; cleared on logout)
+      2. $XDG_STATE_HOME (per-user, persists across reboots)
+      3. $TMPDIR/agent-audio-relay-<uid> as a last resort
+    """
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime:
+        return Path(runtime) / "agent-audio-relay"
+    state = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    if state and Path(state).expanduser().parent.exists():
+        return Path(state) / "agent-audio-relay"
+    return Path(_TMP) / f"agent-audio-relay-{os.getuid()}"
+
+
+_STATE_ROOT = _per_user_state_root()
+QUEUE_DIR = Path(os.environ.get("RELAY_QUEUE_DIR", str(_STATE_ROOT / "queue")))
+STATE_FILE = Path(os.environ.get("RELAY_STATE_FILE", str(_STATE_ROOT / "delivered.txt")))
 PAD_SILENCE = os.environ.get("RELAY_PAD_SILENCE", "1") == "1"
 
 AUDIO_EXTS = {"mp3", "opus", "ogg", "wav"}
@@ -211,6 +238,7 @@ def cmd_list() -> int:
 
 def watch() -> None:
     QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     STATE_FILE.touch(exist_ok=True)
 
     for d in WATCH_DIRS:

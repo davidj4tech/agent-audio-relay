@@ -116,6 +116,8 @@ original backend — designed for Android phones running Termux over SSH.
 | `RELAY_SSH_HOST` | `p8ar` | SSH alias for the target device |
 | `RELAY_SSH_MAX_RETRIES` | `2` | Retry count for SCP/play |
 | `RELAY_SSH_PLAYBACK_WAIT` | `120` | Max seconds to wait for playback |
+| `RELAY_TERMUX_PLAYER` | `termux-media-player` | `mpv-ipc` to deliver via the long-running mpv-tts daemon (required if you want `tts-ctl`/popup controls to actually control delivery audio) |
+| `RELAY_TERMUX_MPV_SOCK` | `/data/data/com.termux/files/usr/tmp/mpv-tts.sock` | Remote mpv IPC socket path |
 | `RELAY_TERMUX_SWITCH_CMD` | *(empty)* | Remote command run before playing when the target changes — the target is appended as a shell-quoted arg. Unset means no reroute. |
 
 #### Bluetooth target switching
@@ -398,8 +400,10 @@ systemctl --user reenable --now opencode-tts-watcher
 
 ## Playback control
 
-`bin/tts-ctl` wraps `termux-media-player` over SSH for the `ssh-termux`
-backend:
+`bin/tts-ctl` talks JSON-IPC to a long-running mpv daemon (the Termux
+service `mpv-tts`, exposing `$PREFIX/tmp/mpv-tts.sock`). On the phone
+the script writes to the socket directly; from any other host it
+tunnels over `ssh $CLAUDE_TTS_PHONE_HOST` (default `p8ar`).
 
 ```sh
 tts-ctl pause            # pause current playback
@@ -408,7 +412,40 @@ tts-ctl toggle           # pause/resume depending on state
 tts-ctl replay           # replay latest from the current tmux session
                          #   (falls back to global latest)
 tts-ctl replay foo       # replay latest from session "foo"
+tts-ctl seek 5           # relative seek (negative = backwards)
+tts-ctl volume -5        # add to mpv volume
+tts-ctl status           # state + position/duration + volume
+tts-ctl nowplaying       # current file path
 ```
+
+Required on the phone: `mpv`, `socat`, `jq`, and an mpv daemon launched
+with `--input-ipc-server=$PREFIX/tmp/mpv-tts.sock --idle=yes`. Override
+the socket with `MPV_TTS_SOCK` if your daemon binds elsewhere.
+
+The companion project [mpv-mcp](https://github.com/davidj4tech/mpv-mcp)
+(Node, runs in Termux) provisions both `mpv` channels as runit services,
+exposes the same controls as an MCP server + HTTP/JSON API, and serves
+an installable PWA at `http://<tailscale-ip>:8765/` with mpv-style
+keyboard shortcuts. If you set `RELAY_TERMUX_PLAYER=mpv-ipc` on this
+relay, that's the phone-side daemon you're talking to.
+
+### Floating tmux popup
+
+`bin/tts-popup` is an interactive single-key controller meant to run
+inside `tmux display-popup -E`. Suggested bindings (in
+`~/.tmux.conf.local`):
+
+```tmux
+bind T switch-client -T tts
+bind -T tts t     display-popup -E -w 95% -h 7 "~/.local/bin/tts-popup"
+bind -T tts Space display-popup -E -w 95% -h 3 "~/.local/bin/tts-ctl toggle"
+bind -T tts r     display-popup -E -w 95% -h 3 "~/.local/bin/tts-ctl replay"
+```
+
+Hotkeys inside the interactive popup: `Space` toggle, `p` pause, `R`
+resume, `r` replay, `h`/`l` seek ±5s, `H`/`L` seek ±30s, `-`/`=`
+volume ±5, `q` (or `Esc`) close. Width is given as a percentage so
+the popup fits on narrow displays (Termux on a phone).
 
 ## Adding a new agent hook
 

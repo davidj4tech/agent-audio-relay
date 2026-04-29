@@ -1,43 +1,108 @@
 #!/bin/bash
-# TTS playback control — wraps termux-media-player commands on the phone.
-# Usage: tts-ctl pause | resume | replay [session] | toggle
+# TTS playback control via mpv IPC.
+# Usage: tts-ctl pause|resume|toggle|replay [session]|seek SECS|volume DELTA|status|nowplaying
+#
+# Talks to the mpv-tts daemon (Termux service `mpv-tts`) on the phone via
+# its JSON-IPC unix socket. When invoked on the phone the socket is hit
+# directly; from any other host it tunnels over `ssh $CLAUDE_TTS_PHONE_HOST`.
 #
 # replay resolves target in this order:
 #   1. explicit [session] arg
 #   2. current tmux session name
 #   3. global latest
+set -u
 PHONE_HOST="${CLAUDE_TTS_PHONE_HOST:-p8ar}"
 ARCHIVE_DIR="${CLAUDE_TTS_PHONE_ARCHIVE:-/data/data/com.termux/files/home/.cache/agent-audio}"
 EXT="${CLAUDE_TTS_EXT:-mp3}"
+SOCK="${MPV_TTS_SOCK:-/data/data/com.termux/files/usr/tmp/mpv-tts.sock}"
 
 slug() {
     printf '%s' "$1" | tr -c 'A-Za-z0-9-' '-' | sed 's/-\+/-/g; s/^-//; s/-$//'
 }
 
+mpv_cmd() {
+    local json="$1"
+    if [ -S "$SOCK" ]; then
+        printf '%s\n' "$json" | socat - "UNIX-CONNECT:$SOCK" 2>/dev/null
+    else
+        # shellcheck disable=SC2029
+        ssh -o BatchMode=yes "$PHONE_HOST" \
+            "printf '%s\n' $(printf '%q' "$json") | socat - 'UNIX-CONNECT:$SOCK'" \
+            2>/dev/null
+    fi
+}
+
+mpv_get() {
+    local prop="$1"
+    mpv_cmd "{\"command\":[\"get_property\",\"$prop\"]}" \
+        | jq -r 'select(.error=="success") | .data' 2>/dev/null
+}
+
 replay_target() {
     local session="$1"
-    if [ -z "$session" ] && [ -n "$TMUX_PANE" ]; then
+    if [ -z "$session" ] && [ -n "${TMUX_PANE:-}" ]; then
         session=$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)
     fi
     if [ -n "$session" ]; then
         local s
         s=$(slug "$session")
-        local session_path="$ARCHIVE_DIR/latest--${s}.$EXT"
-        if ssh "$PHONE_HOST" "[ -e '$session_path' ]" 2>/dev/null; then
-            printf '%s' "$session_path"
-            return
-        fi
+        printf '%s' "$ARCHIVE_DIR/latest--${s}.$EXT"
+    else
+        printf '%s' "$ARCHIVE_DIR/latest.$EXT"
     fi
-    printf '%s' "$ARCHIVE_DIR/latest.$EXT"
 }
 
-case "$1" in
-    pause)  ssh "$PHONE_HOST" "termux-media-player pause" ;;
-    resume) ssh "$PHONE_HOST" "termux-media-player play" ;;
+fmt_time() {
+    local t="$1"
+    if [ -z "$t" ] || [ "$t" = "null" ]; then
+        printf -- '--:--'
+        return
+    fi
+    awk -v t="$t" 'BEGIN{ s=int(t); printf "%02d:%02d", s/60, s%60 }'
+}
+
+case "${1:-}" in
+    pause)   mpv_cmd '{"command":["set_property","pause",true]}'  >/dev/null ;;
+    resume)  mpv_cmd '{"command":["set_property","pause",false]}' >/dev/null ;;
+    toggle)
+        # If mpv is idle (no file loaded or playback finished), start the
+        # latest clip; otherwise just flip pause.
+        if [ "$(mpv_get idle-active)" = "true" ]; then
+            target=$(replay_target "${2:-}")
+            mpv_cmd "{\"command\":[\"loadfile\",\"$target\",\"replace\"]}" >/dev/null
+            mpv_cmd '{"command":["set_property","pause",false]}'           >/dev/null
+        else
+            mpv_cmd '{"command":["cycle","pause"]}' >/dev/null
+        fi
+        ;;
     replay)
         target=$(replay_target "${2:-}")
-        ssh "$PHONE_HOST" "termux-media-player play '$target'"
+        mpv_cmd "{\"command\":[\"loadfile\",\"$target\",\"replace\"]}" >/dev/null
+        mpv_cmd '{"command":["set_property","pause",false]}'           >/dev/null
         ;;
-    toggle) ssh "$PHONE_HOST" "termux-media-player info | grep -qi playing && termux-media-player pause || termux-media-player play" ;;
-    *)      echo "Usage: tts-ctl pause|resume|replay [session]|toggle" >&2; exit 1 ;;
+    seek)    mpv_cmd "{\"command\":[\"seek\",${2:-5},\"relative\"]}"   >/dev/null ;;
+    volume)  mpv_cmd "{\"command\":[\"add\",\"volume\",${2:-5}]}"      >/dev/null ;;
+    status)
+        paused=$(mpv_get pause)
+        idle=$(mpv_get idle-active)
+        pos=$(mpv_get time-pos)
+        dur=$(mpv_get duration)
+        vol=$(mpv_get volume)
+        if [ "$idle" = "true" ] || [ -z "$paused" ]; then
+            state="○ idle"
+        elif [ "$paused" = "true" ]; then
+            state="⏸  PAUSED"
+        else
+            state="▶  PLAYING"
+        fi
+        printf '%s  %s/%s  vol=%s\n' \
+            "$state" "$(fmt_time "$pos")" "$(fmt_time "$dur")" "${vol%.*}"
+        ;;
+    nowplaying)
+        mpv_get path
+        ;;
+    *)
+        echo "Usage: tts-ctl pause|resume|toggle|replay [session]|seek SECS|volume DELTA|status|nowplaying" >&2
+        exit 1
+        ;;
 esac
