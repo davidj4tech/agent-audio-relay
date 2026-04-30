@@ -17,7 +17,7 @@
  *
  * Other env vars:
  *   PI_TTS_ENABLED        "0" disables (default: enabled)
- *   PI_TTS_DROP_DIR       Drop dir (default: /tmp/tts-pi)
+ *   PI_TTS_DROP_DIR       Drop dir (default: ~/.cache/agent-audio-relay/tts-pi on Termux, /tmp/tts-pi elsewhere)
  *   PI_TTS_OPENAI_MODEL   OpenAI model (default: gpt-4o-mini-tts)
  *   PI_TTS_EDGE_BIN       edge-tts binary (default: edge-tts)
  *   PI_TTS_MAX_CHARS      Cap on text length sent to TTS (default: 4000)
@@ -81,6 +81,13 @@ function stripMarkdown(text: string): string {
 		.replace(/[ \t]+/g, " ")
 		.replace(/\n{3,}/g, "\n\n")
 		.trim();
+}
+
+function defaultDropDir(): string {
+	if ((process.env.PREFIX || "").includes("com.termux")) {
+		return join(process.env.HOME || "/tmp", ".cache", "agent-audio-relay", "tts-pi");
+	}
+	return "/tmp/tts-pi";
 }
 
 function lastAssistantText(messages: any[]): string {
@@ -149,7 +156,7 @@ export default function (pi: ExtensionAPI) {
 			const cap = Number(process.env.PI_TTS_MAX_CHARS) || 4000;
 			const text = cleaned.length > cap ? cleaned.slice(0, cap) + " …" : cleaned;
 
-			const dropDir = process.env.PI_TTS_DROP_DIR || "/tmp/tts-pi";
+			const dropDir = process.env.PI_TTS_DROP_DIR || defaultDropDir();
 			mkdirSync(dropDir, { recursive: true });
 
 			const engine = (process.env.PI_TTS_ENGINE || "edge").toLowerCase();

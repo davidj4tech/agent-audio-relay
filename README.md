@@ -354,7 +354,7 @@ cp extensions/pi-tts-extension.ts ~/.pi/agent/extensions/agent-audio-relay-tts.t
 | `PI_TTS_VOICE` | `marin` (openai) / `en-US-AriaNeural` (edge) | Voice name |
 | `PI_TTS_OPENAI_MODEL` | `gpt-4o-mini-tts` | OpenAI TTS model |
 | `PI_TTS_EDGE_BIN` | `edge-tts` | Path to `edge-tts` (engine=edge) |
-| `PI_TTS_DROP_DIR` | `/tmp/tts-pi` | Audio drop directory |
+| `PI_TTS_DROP_DIR` | `~/.cache/agent-audio-relay/tts-pi` on Termux, `/tmp/tts-pi` elsewhere | Audio drop directory |
 | `PI_TTS_MAX_CHARS` | `4000` | Cap on text length sent to TTS |
 
 When `PI_TTS_ENGINE=openai`, set `OPENAI_API_KEY` in the environment pi
