@@ -5,16 +5,25 @@ After=network.target
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/agent-audio-relay
-# Backend: ssh-termux (default) or mpv
-Environment=RELAY_BACKEND=ssh-termux
-# ssh-termux backend settings:
-Environment=RELAY_SSH_HOST=p8ar
-# mpv backend settings (uncomment to use):
-# Environment=RELAY_BACKEND=mpv
-# Environment=RELAY_MPV_SOCKET=/tmp/mpv-relay.sock
-Environment=RELAY_WATCH_DIRS=/tmp/openclaw:/tmp
+# This is the *playback host* unit — the daemon that watches drop dirs and
+# pushes audio into a player. Pick one backend:
+#
+#   mpv         — local mpv via JSON IPC (recommended on the playback host)
+#   ssh-termux  — push to a remote Termux phone over SSH (use this only if
+#                 the player is on a different host AND you do not run the
+#                 forwarder service. Don't combine ssh-termux on one host
+#                 with agent-audio-relay-forwarder + a remote relay — that
+#                 delivers every clip twice and mpv will restart the file
+#                 mid-playback.)
+Environment=RELAY_BACKEND=mpv
+Environment=RELAY_MPV_SOCKET=/tmp/mpv-relay.sock
+# ssh-termux backend settings (uncomment if RELAY_BACKEND=ssh-termux):
+# Environment=RELAY_SSH_HOST=p8ar
+# Environment=RELAY_TERMUX_PLAYER=mpv-ipc
+Environment=RELAY_WATCH_DIRS=%h/.cache/agent-audio-relay
 # Per-user queue dir so multiple OS users on one host don't collide on /tmp.
 Environment=RELAY_QUEUE_DIR=%t/agent-audio-relay-queue
+Environment=RELAY_PAD_SILENCE=1
 Restart=always
 RestartSec=5
 

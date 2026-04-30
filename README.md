@@ -24,10 +24,14 @@ to the right agent.
                                     ▼
                            PLAYBACK BACKENDS
                     ┌───────────────────────────┐
-                    │ ssh-termux (SSH + phone)   │
-                    │ mpv (local/IPC/remote)     │
-                    │ (future: PipeWire, HTTP)   │
+                    │ mpv (local/IPC/remote)    │
+                    │ ssh-termux (SSH + phone)  │
+                    │ (future: PipeWire, HTTP)  │
                     └───────────────────────────┘
+
+  For split sender/player deploys, swap the relay on the sender for
+  agent-audio-relay-forwarder.sh, which scp's clips to the player's
+  watch dir and lets the player-side relay handle delivery.
 ```
 
 ## Install
@@ -37,6 +41,32 @@ pip install --user agent-audio-relay
 # or from source:
 pip install --user /path/to/agent-audio-relay
 ```
+
+## Deployment topologies
+
+Pick one. Mixing them — running the relay daemon on the sender *and*
+the forwarder *and* a relay daemon on the player — sends `loadfile` to
+mpv twice per clip, which restarts the file mid-playback and chops the
+tail. (Lesson learned the hard way.)
+
+**Single-host.** Hooks, relay daemon, and player all on one machine.
+Run `agent-audio-relay` with `RELAY_BACKEND=mpv` (or whatever local
+backend), watching `/tmp/tts-*` (or wherever your hooks drop). This is
+the simplest setup.
+
+**Two-host (sender + player).** Hooks run on a headless host (e.g. a
+Pi running Claude Code) but you want the audio on a different machine
+(e.g. an Android phone in Termux running mpv with mpv-tts.sock). The
+sender runs `agent-audio-relay-forwarder.sh`, which inotify-watches its
+local `/tmp/tts-*` drop dirs and `scp`s each new clip to the player's
+`~/.cache/agent-audio-relay/<src_dir>/`. The player runs
+`agent-audio-relay` with `RELAY_BACKEND=mpv`, watching that same
+directory. Only one daemon ever issues `loadfile`.
+
+The older alternative — running `agent-audio-relay` on the sender with
+`RELAY_BACKEND=ssh-termux` to push directly into a remote mpv socket —
+still works for small setups, but skip it if you also want the
+multi-channel ducking that requires mpv-mcp on the player side.
 
 ## Watcher daemon (core)
 
@@ -414,14 +444,34 @@ mkdir -p ~/.config/systemd/user
 
 # Make sure user services keep running after logout / across reboots
 sudo loginctl enable-linger "$USER"
+```
 
-# Main watcher
+**Playback host (single-host or two-host setups).** The relay daemon:
+
+```sh
 cp systemd/agent-audio-relay.service ~/.config/systemd/user/
-# Edit RELAY_BACKEND and backend-specific vars as needed
+# Edit RELAY_BACKEND, RELAY_WATCH_DIRS, and backend-specific vars as needed.
+# Default in the template is RELAY_BACKEND=mpv watching ~/.cache/agent-audio-relay.
 systemctl --user daemon-reload
 systemctl --user reenable --now agent-audio-relay
+```
 
-# OpenCode watcher (optional)
+**Sender host (two-host setups only).** The forwarder, in place of a
+local relay daemon — never both at once on the same flow:
+
+```sh
+ln -sf /path/to/agent-audio-relay/bin/agent-audio-relay-forwarder.sh \
+    ~/.local/bin/agent-audio-relay-forwarder.sh
+cp systemd/agent-audio-relay-forwarder.service ~/.config/systemd/user/
+# Optional: edit RELAY_FWD_REMOTE / RELAY_FWD_REMOTE_BASE / RELAY_FWD_WATCH_ROOTS
+systemctl --user daemon-reload
+systemctl --user reenable --now agent-audio-relay-forwarder
+```
+
+**OpenCode watcher (optional, on whichever host runs OpenCode).** Hook
+script only — does not need the relay binary installed:
+
+```sh
 cp systemd/opencode-tts-watcher.service ~/.config/systemd/user/
 # Edit ExecStart to point at your hooks/ path
 systemctl --user daemon-reload

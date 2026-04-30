@@ -1,0 +1,18 @@
+[Unit]
+Description=Forward local TTS clips to a remote agent-audio-relay watch dir
+After=network.target
+
+[Service]
+Type=simple
+# Adjust the path to wherever you've checked out the repo, or symlink the
+# script into ~/.local/bin/.
+ExecStart=%h/.local/bin/agent-audio-relay-forwarder.sh
+# Override defaults if needed:
+# Environment=RELAY_FWD_REMOTE=p8ar
+# Environment=RELAY_FWD_REMOTE_BASE=.cache/agent-audio-relay
+# Environment=RELAY_FWD_WATCH_ROOTS=/tmp/tts-claude /tmp/tts-codex /tmp/tts-opencode /tmp/tts-ha
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
