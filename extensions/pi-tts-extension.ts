@@ -9,10 +9,11 @@
  * SSH+Termux, mpv, etc.).
  *
  * Engines (PI_TTS_ENGINE):
- *   openai (default) — POSTs to https://api.openai.com/v1/audio/speech
- *                      using OPENAI_API_KEY.  Voice: PI_TTS_VOICE (default "marin").
- *   edge             — Spawns the `edge-tts` CLI (free, no key).
- *                      Voice: PI_TTS_VOICE (default "en-US-AriaNeural").
+ *   edge (default)  — Spawns the `edge-tts` CLI (free, no key).
+ *                     Voice: PI_TTS_VOICE (default "en-US-AriaNeural").
+ *   openai          — POSTs to https://api.openai.com/v1/audio/speech
+ *                     using OPENAI_API_KEY. Voice: PI_TTS_VOICE (default "marin").
+ *                     Falls back to edge if OpenAI TTS fails.
  *
  * Other env vars:
  *   PI_TTS_ENABLED        "0" disables (default: enabled)
@@ -151,13 +152,17 @@ export default function (pi: ExtensionAPI) {
 			const dropDir = process.env.PI_TTS_DROP_DIR || "/tmp/tts-pi";
 			mkdirSync(dropDir, { recursive: true });
 
-			const engine = (process.env.PI_TTS_ENGINE || "openai").toLowerCase();
+			const engine = (process.env.PI_TTS_ENGINE || "edge").toLowerCase();
 			const outfile = join(dropDir, `${makeStem("pi", "stop")}.mp3`);
 
 			if (engine === "edge") {
 				await ttsEdge(text, outfile);
 			} else if (engine === "openai") {
-				await ttsOpenAI(text, outfile);
+				try {
+					await ttsOpenAI(text, outfile);
+				} catch {
+					await ttsEdge(text, outfile);
+				}
 			} else {
 				// Unknown engine: silent no-op (don't break the agent)
 				return;
