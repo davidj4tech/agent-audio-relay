@@ -72,7 +72,7 @@ class MpvBackend(PlaybackBackend):
                 pass
             self._proc = None
 
-    def _update_latest(self, path: Path) -> None:
+    def _update_latest(self, path: Path) -> Path:
         state_root = Path(os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")))
         state = state_root / "agent-audio-relay"
         state.mkdir(parents=True, exist_ok=True)
@@ -82,25 +82,28 @@ class MpvBackend(PlaybackBackend):
                 import shutil as _shutil
                 _shutil.copy2(str(path), str(archive))
         except OSError:
-            return
+            return path
         link = state / f"latest{path.suffix}"
         link.unlink(missing_ok=True)
         try:
             link.symlink_to(archive.name)
         except OSError:
             pass
+        return archive
 
     def play(self, path: Path) -> bool:
-        self._update_latest(path)
-        # IPC mode: load file into running mpv
+        playable = self._update_latest(path)
+        # IPC mode: load the archived copy into running mpv. The queue entry is
+        # deleted after play() returns, and mpv may not open append-play files
+        # until after the IPC command has returned.
         if self.ipc_socket:
-            resp = self._send_ipc(["loadfile", str(path), "append-play"])
+            resp = self._send_ipc(["loadfile", str(playable), "append-play"])
             if resp and resp.get("error") == "success":
                 return True
             return False
 
         # Direct invocation
-        cmd = [self.bin, "--no-video", "--really-quiet"] + self.extra_args + [str(path)]
+        cmd = [self.bin, "--no-video", "--really-quiet"] + self.extra_args + [str(playable)]
         try:
             if self.wait:
                 subprocess.run(cmd, check=True, timeout=300)
