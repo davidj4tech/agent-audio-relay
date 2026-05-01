@@ -267,11 +267,18 @@ def watch() -> None:
         f"control={CONTROL_FILE}, profiles={PROFILES_FILE})"
     )
 
+    # Older inotifywait (≤ 3.22) fully-buffers stdout on pipes, so events
+    # stay invisible until ~4KB accumulates — effectively never for one-line
+    # events. stdbuf -oL forces line buffering. Newer inotifywait (≥ 4.x)
+    # already flushes per line, so the prefix is harmless there.
+    inotify_cmd = ["inotifywait", "-m", "-r",
+                   "-e", "close_write", "-e", "moved_to",
+                   "--format", "%w%f"] + WATCH_DIRS
+    if shutil.which("stdbuf"):
+        inotify_cmd = ["stdbuf", "-oL"] + inotify_cmd
     try:
         proc = subprocess.Popen(
-            ["inotifywait", "-m", "-r",
-             "-e", "close_write", "-e", "moved_to",
-             "--format", "%w%f"] + WATCH_DIRS,
+            inotify_cmd,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
         )
     except FileNotFoundError:
