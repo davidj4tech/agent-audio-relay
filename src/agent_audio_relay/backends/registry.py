@@ -26,7 +26,7 @@ from typing import Tuple
 
 from .base import PlaybackBackend
 
-KNOWN_BACKENDS = ("ssh-termux", "mpv")
+KNOWN_BACKENDS = ("ssh-termux", "mpv", "ssh-mpv")
 DEFAULT_BACKEND = "ssh-termux"
 
 
@@ -135,6 +135,9 @@ def build_backend(name: str, target: str | None = None) -> PlaybackBackend:
     if name == "mpv":
         from .mpv import MpvBackend
         return MpvBackend(target=target)
+    if name == "ssh-mpv":
+        from .ssh_mpv import SshMpvBackend
+        return SshMpvBackend(target=target)
     print(f"error: unknown backend {name!r}. Options: {', '.join(KNOWN_BACKENDS)}",
           file=sys.stderr)
     sys.exit(1)

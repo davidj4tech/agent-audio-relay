@@ -32,6 +32,9 @@ Subcommands:
     agent-audio-relay switch <sel>      Flip the active selector via control file.
     agent-audio-relay status            Print the current selector.
     agent-audio-relay list              Print known backends and configured aliases.
+    agent-audio-relay scan [host]       SSH to host (default $RELAY_SSH_MPV_HOST or
+                                        "homer"), list BT-capable PipeWire sinks,
+                                        and emit suggested profiles.json aliases.
 
 See backend modules for backend-specific env vars (including the BT-switch
 hook `RELAY_TERMUX_SWITCH_CMD` used by the ssh-termux backend).
@@ -222,6 +225,94 @@ def cmd_status() -> int:
     return 0
 
 
+def cmd_scan(host: str | None) -> int:
+    """SSH to a remote host and enumerate BT-capable PipeWire/Pulse sinks.
+
+    Correlates `pactl list short sinks` with `bluetoothctl devices Paired` to
+    map sink names to friendly device names. Prints suggested profiles.json
+    entries so the user can paste them into their aliases config.
+    """
+    target_host = host or os.environ.get("RELAY_SSH_MPV_HOST", "homer")
+
+    try:
+        sinks_out = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+             target_host, "pactl list short sinks"],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout
+    except (subprocess.SubprocessError, OSError) as e:
+        print(f"error: pactl on {target_host} failed ({e.__class__.__name__})",
+              file=sys.stderr)
+        return 1
+
+    try:
+        paired_out = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+             target_host, "bluetoothctl devices Paired 2>/dev/null || bluetoothctl paired-devices"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout
+    except (subprocess.SubprocessError, OSError):
+        paired_out = ""
+
+    # Parse paired devices: "Device AA:BB:CC:DD:EE:FF Friendly Name"
+    paired: dict[str, str] = {}
+    for line in paired_out.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) >= 3 and parts[0] == "Device":
+            paired[parts[1].upper()] = parts[2]
+
+    sinks: list[tuple[str, str | None, str | None]] = []
+    for line in sinks_out.splitlines():
+        cols = line.split("\t")
+        if len(cols) < 2:
+            continue
+        sink_name = cols[1]
+        mac: str | None = None
+        friendly: str | None = None
+        # Match bluez_output.XX_XX_XX_XX_XX_XX.1 or bluez_sink.XX_XX_XX_XX_XX_XX.a2dp_sink
+        if "bluez_" in sink_name:
+            for part in sink_name.split("."):
+                if part.count("_") == 5 and len(part) == 17:
+                    mac = part.replace("_", ":").upper()
+                    friendly = paired.get(mac)
+                    break
+        sinks.append((sink_name, mac, friendly))
+
+    print(f"sinks on {target_host}:")
+    for sink_name, mac, friendly in sinks:
+        label = friendly or ("(BT, not paired here)" if mac else "(local)")
+        mac_str = f" [{mac}]" if mac else ""
+        print(f"  {sink_name}{mac_str}  -- {label}")
+
+    bt_sinks = [(n, m, f) for n, m, f in sinks if m]
+    if bt_sinks:
+        print()
+        print("suggested profiles.json aliases:")
+        print('{')
+        print('  "aliases": {')
+        lines = []
+        for sink_name, mac, friendly in bt_sinks:
+            alias = (friendly or mac or "bt").lower()
+            alias = "".join(c if c.isalnum() else "-" for c in alias).strip("-")
+            lines.append(
+                f'    "{alias}": {{"backend": "ssh-mpv", "target": "{sink_name}"}}'
+            )
+        print(",\n".join(lines))
+        print('  }')
+        print('}')
+
+    if not bt_sinks:
+        print()
+        print("no Bluetooth sinks currently active.")
+        print(f"connect one first, e.g. on {target_host}:")
+        print("  bluetoothctl connect <MAC>")
+        if paired:
+            print("paired devices:")
+            for mac, name in sorted(paired.items()):
+                print(f"  {mac}  {name}")
+    return 0
+
+
 def cmd_list() -> int:
     print("backends:")
     for b in KNOWN_BACKENDS:
@@ -301,9 +392,12 @@ def main() -> None:
         sys.exit(cmd_status())
     if argv and argv[0] == "list":
         sys.exit(cmd_list())
+    if argv and argv[0] == "scan":
+        host = argv[1] if len(argv) >= 2 else None
+        sys.exit(cmd_scan(host))
     if argv and argv[0] not in ("watch",):
         print(
-            "usage: agent-audio-relay [watch | switch <selector> | status | list]",
+            "usage: agent-audio-relay [watch | switch <selector> | status | list | scan [host]]",
             file=sys.stderr,
         )
         sys.exit(2)
