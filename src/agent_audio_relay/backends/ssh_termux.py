@@ -14,7 +14,9 @@ Environment variables:
     RELAY_SSH_DEST              Remote path prefix for audio files (default: .cache/relay-latest)
     RELAY_SSH_MAX_RETRIES       Retry count for SCP/play (default: 2)
     RELAY_SSH_PLAYBACK_WAIT     Max seconds to wait for current playback (default: 120)
-    RELAY_TERMUX_PLAYER         `termux-media-player` (default) or `mpv-ipc`.
+    RELAY_TERMUX_PLAYER         `termux-media-player` or `mpv-ipc`. Unset =
+                                auto-detect: probe the mpv IPC socket and use
+                                mpv-ipc if reachable, else termux-media-player.
     RELAY_TERMUX_MPV_SOCK       Remote path of the mpv IPC socket
                                 (default: $PREFIX/tmp/mpv-tts.sock,
                                 resolved on the phone as
@@ -48,13 +50,37 @@ class SshTermuxBackend(PlaybackBackend):
         self.max_retries = int(os.environ.get("RELAY_SSH_MAX_RETRIES", "2"))
         self.max_wait = int(os.environ.get("RELAY_SSH_PLAYBACK_WAIT", "120"))
         self.switch_cmd = os.environ.get("RELAY_TERMUX_SWITCH_CMD", "").strip()
-        self.player = os.environ.get("RELAY_TERMUX_PLAYER", "termux-media-player").strip()
         self.mpv_sock = os.environ.get(
             "RELAY_TERMUX_MPV_SOCK",
             "/data/data/com.termux/files/usr/tmp/mpv-tts.sock",
         )
+        # mpv-ipc is strictly better than termux-media-player (queueing, seek,
+        # volume, accurate result reporting) but needs a long-running mpv on
+        # the remote with --input-ipc-server. Auto-detect when the user
+        # didn't pin a choice: probe the socket once and pick mpv-ipc if
+        # something's listening.
+        explicit = os.environ.get("RELAY_TERMUX_PLAYER", "").strip()
+        if explicit:
+            self.player = explicit
+        else:
+            self.player = self._detect_player()
         self.target = target
         self._last_switched: str | None = None
+
+    def _detect_player(self) -> str:
+        probe = (
+            f"test -S {shlex.quote(self.mpv_sock)} && "
+            f"socat -u /dev/null UNIX-CONNECT:{shlex.quote(self.mpv_sock)}"
+        )
+        try:
+            rc = subprocess.run(
+                ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3",
+                 self.host, probe],
+                capture_output=True, text=True, timeout=8,
+            ).returncode
+        except (subprocess.SubprocessError, OSError):
+            return "termux-media-player"
+        return "mpv-ipc" if rc == 0 else "termux-media-player"
 
     def _ssh(self, cmd: str, timeout: int = 10) -> subprocess.CompletedProcess:
         return subprocess.run(
