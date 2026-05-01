@@ -55,6 +55,8 @@ case "$ENGINE" in
 esac
 DROP_DIR="${OPENCODE_TTS_DROP_DIR:-/tmp/tts-opencode}"
 STATE_FILE="${OPENCODE_TTS_STATE_FILE:-/tmp/opencode-tts-state.tsv}"
+MTIME_FILE="${OPENCODE_TTS_MTIME_FILE:-/tmp/opencode-tts-mtime.tsv}"
+EXPORT_TIMEOUT="${OPENCODE_TTS_EXPORT_TIMEOUT:-20}"
 SESSIONS_DIR="${OPENCODE_TTS_SESSIONS_DIR:-${HOME}/.local/share/opencode/storage/session_diff}"
 LOG_FILE="${OPENCODE_TTS_LOG_FILE:-/tmp/opencode-tts.log}"
 POLL_INTERVAL="${OPENCODE_TTS_POLL_INTERVAL:-3}"
@@ -63,7 +65,9 @@ MAX_MESSAGE_AGE="${OPENCODE_TTS_MAX_MESSAGE_AGE:-300}"
 mkdir -p "$DROP_DIR"
 mkdir -p "$(dirname "$STATE_FILE")"
 mkdir -p "$(dirname "$LOG_FILE")"
+mkdir -p "$(dirname "$MTIME_FILE")"
 touch "$STATE_FILE"
+touch "$MTIME_FILE"
 touch "$LOG_FILE"
 
 # shellcheck source=lib/denote-stem.sh
@@ -89,7 +93,7 @@ strip_markdown() {
 latest_final_answer() {
   local session_id="$1"
 
-  "$OPENCODE_BIN" export "$session_id" 2>/dev/null \
+  timeout "$EXPORT_TIMEOUT" "$OPENCODE_BIN" export "$session_id" 2>/dev/null \
     | sed '1{/^Exporting session: /d;}' \
     | jq -c '
         [
@@ -134,6 +138,26 @@ state_set() {
   mv "$tmp" "$STATE_FILE"
 }
 
+mtime_get() {
+  local session_id="$1"
+  local line
+
+  line=$(grep -F "${session_id}"$'	' "$MTIME_FILE" | tail -n 1 || true)
+  [ -n "$line" ] || return 1
+  printf '%s\n' "${line#*$'	'}"
+}
+
+mtime_set() {
+  local session_id="$1"
+  local mtime="$2"
+  local tmp
+
+  tmp=$(mktemp)
+  grep -Fv "${session_id}"$'	' "$MTIME_FILE" > "$tmp" || true
+  printf '%s\t%s\n' "$session_id" "$mtime" >> "$tmp"
+  mv "$tmp" "$MTIME_FILE"
+}
+
 seed_state() {
   local file session_id latest message_id
 
@@ -141,11 +165,14 @@ seed_state() {
   shopt -s nullglob
   for file in "$SESSIONS_DIR"/*.json; do
     session_id="$(basename "$file" .json)"
+    file_mtime=$(stat -c %Y "$file" 2>/dev/null || echo 0)
     latest=$(latest_final_answer "$session_id" || true)
+    mtime_set "$session_id" "$file_mtime"
     [ -n "$latest" ] || continue
     message_id=$(printf '%s\n' "$latest" | jq -r '.id')
     [ -n "$message_id" ] || continue
     state_set "$session_id" "$message_id"
+    mtime_set "$session_id" "$file_mtime"
     log "Seeded session $session_id with message $message_id"
   done
   shopt -u nullglob
@@ -224,17 +251,27 @@ while true; do
   shopt -s nullglob
   for file in "$SESSIONS_DIR"/*.json; do
     session_id="$(basename "$file" .json)"
+    file_mtime=$(stat -c %Y "$file" 2>/dev/null || echo 0)
+    known_mtime=$(mtime_get "$session_id" || true)
+    [ "$known_mtime" = "$file_mtime" ] && continue
+
     latest=$(latest_final_answer "$session_id" || true)
-    [ -n "$latest" ] || continue
+    if [ -z "$latest" ]; then
+      mtime_set "$session_id" "$file_mtime"
+      continue
+    fi
 
     message_id=$(printf '%s\n' "$latest" | jq -r '.id')
     completed_ms=$(printf '%s\n' "$latest" | jq -r '.completed')
     text=$(printf '%s\n' "$latest" | jq -r '.text')
-    [ -n "$message_id" ] || continue
-    [ -n "$completed_ms" ] || continue
+    [ -n "$message_id" ] || { mtime_set "$session_id" "$file_mtime"; continue; }
+    [ -n "$completed_ms" ] || { mtime_set "$session_id" "$file_mtime"; continue; }
 
     known_id=$(state_get "$session_id" || true)
-    [ "$known_id" = "$message_id" ] && continue
+    if [ "$known_id" = "$message_id" ]; then
+      mtime_set "$session_id" "$file_mtime"
+      continue
+    fi
 
     completed_s=$((completed_ms / 1000))
     now_s=$(date +%s)
@@ -242,12 +279,14 @@ while true; do
     if (( age_s > MAX_MESSAGE_AGE )); then
       log "Skipping stale message $message_id from $session_id (${age_s}s old)"
       state_set "$session_id" "$message_id"
+      mtime_set "$session_id" "$file_mtime"
       continue
     fi
 
     log "Speaking message $message_id from $session_id"
     enqueue_tts "$text" "$session_id"
     state_set "$session_id" "$message_id"
+    mtime_set "$session_id" "$file_mtime"
   done
   shopt -u nullglob
 
