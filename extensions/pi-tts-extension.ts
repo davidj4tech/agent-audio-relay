@@ -17,7 +17,7 @@
  *
  * Other env vars:
  *   PI_TTS_ENABLED        "0" disables (default: enabled)
- *   PI_TTS_DROP_DIR       Drop dir (default: ~/.cache/agent-audio-relay/tts-pi on Termux, /tmp/tts-pi elsewhere)
+ *   PI_TTS_DROP_DIR       Drop dir (default: ~/.cache/agent-audio-relay/tts-pi)
  *   PI_TTS_OPENAI_MODEL   OpenAI model (default: gpt-4o-mini-tts)
  *   PI_TTS_EDGE_BIN       edge-tts binary (default: edge-tts)
  *   PI_TTS_MAX_CHARS      Cap on text length sent to TTS (default: 4000)
@@ -84,10 +84,7 @@ function stripMarkdown(text: string): string {
 }
 
 function defaultDropDir(): string {
-	if ((process.env.PREFIX || "").includes("com.termux")) {
-		return join(process.env.HOME || "/tmp", ".cache", "agent-audio-relay", "tts-pi");
-	}
-	return "/tmp/tts-pi";
+	return join(process.env.HOME || "/tmp", ".cache", "agent-audio-relay", "tts-pi");
 }
 
 function lastAssistantText(messages: any[]): string {

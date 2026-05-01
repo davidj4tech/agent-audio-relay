@@ -91,7 +91,7 @@ agent-audio-relay
 | Variable | Default | Meaning |
 |---|---|---|
 | `RELAY_BACKEND` | `ssh-termux` | Default selector — bare backend or `backend:target` |
-| `RELAY_CONTROL_FILE` | `/tmp/agent-audio-relay-backend` | Control file used by `switch` |
+| `RELAY_CONTROL_FILE` | `$XDG_RUNTIME_DIR/agent-audio-relay/backend` (fallback `/tmp/agent-audio-relay-backend-<uid>`) | Control file used by `switch` |
 | `RELAY_PROFILES_FILE` | `~/.config/agent-audio-relay/profiles.json` | Alias map |
 | `RELAY_WATCH_DIRS` | `/tmp/openclaw:/tmp` | Colon-separated dirs to watch |
 | `RELAY_QUEUE_DIR` | `/tmp/agent-audio-relay-queue` | Local queue directory (set to `$XDG_RUNTIME_DIR/agent-audio-relay-queue` under systemd to avoid cross-user `/tmp` collisions — see the shipped unit) |
@@ -384,7 +384,7 @@ cp extensions/pi-tts-extension.ts ~/.pi/agent/extensions/agent-audio-relay-tts.t
 | `PI_TTS_VOICE` | `marin` (openai) / `en-US-AriaNeural` (edge) | Voice name |
 | `PI_TTS_OPENAI_MODEL` | `gpt-4o-mini-tts` | OpenAI TTS model |
 | `PI_TTS_EDGE_BIN` | `edge-tts` | Path to `edge-tts` (engine=edge) |
-| `PI_TTS_DROP_DIR` | `~/.cache/agent-audio-relay/tts-pi` on Termux, `/tmp/tts-pi` elsewhere | Audio drop directory |
+| `PI_TTS_DROP_DIR` | `~/.cache/agent-audio-relay/tts-pi` | Audio drop directory |
 | `PI_TTS_MAX_CHARS` | `4000` | Cap on text length sent to TTS |
 
 When `PI_TTS_ENGINE=openai`, set `OPENAI_API_KEY` in the environment pi

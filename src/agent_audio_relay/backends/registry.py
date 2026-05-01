@@ -9,7 +9,9 @@ Selector forms accepted by `parse_selector`:
     <alias>                 → resolved via profiles.json (see load_profiles)
 
 Name resolution for the *active* selector (used by the watcher loop):
-    1. Control file at $RELAY_CONTROL_FILE (default /tmp/agent-audio-relay-backend).
+    1. Control file at $RELAY_CONTROL_FILE (default
+       $XDG_RUNTIME_DIR/agent-audio-relay/backend, falling back to
+       /tmp/agent-audio-relay-backend-<uid>).
     2. $RELAY_BACKEND env var.
     3. DEFAULT_BACKEND.
 """
@@ -26,7 +28,22 @@ from .base import PlaybackBackend
 
 KNOWN_BACKENDS = ("ssh-termux", "mpv")
 DEFAULT_BACKEND = "ssh-termux"
-CONTROL_FILE = Path(os.environ.get("RELAY_CONTROL_FILE", "/tmp/agent-audio-relay-backend"))
+
+
+def _default_control_file() -> Path:
+    """Per-user control file path.
+
+    Prefers $XDG_RUNTIME_DIR (per-user, set by systemd) over /tmp to avoid
+    cross-user collisions on shared hosts. Falls back to /tmp when no runtime
+    dir is available.
+    """
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime:
+        return Path(runtime) / "agent-audio-relay" / "backend"
+    return Path(f"/tmp/agent-audio-relay-backend-{os.getuid()}")
+
+
+CONTROL_FILE = Path(os.environ.get("RELAY_CONTROL_FILE", str(_default_control_file())))
 PROFILES_FILE = Path(
     os.environ.get(
         "RELAY_PROFILES_FILE",

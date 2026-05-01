@@ -17,7 +17,8 @@ Selectors accepted by `switch`:
 Environment variables:
     RELAY_BACKEND           Default selector (backend or backend:target) — used
                             when the control file is empty (default: ssh-termux)
-    RELAY_CONTROL_FILE      Control file (default: /tmp/agent-audio-relay-backend)
+    RELAY_CONTROL_FILE      Control file (default: $XDG_RUNTIME_DIR/agent-audio-relay/backend,
+                            falling back to /tmp/agent-audio-relay-backend-<uid>)
     RELAY_PROFILES_FILE     Alias map (default: ~/.config/agent-audio-relay/profiles.json)
     RELAY_WATCH_DIRS        Colon-separated dirs to watch (default: /tmp/openclaw:/tmp)
     RELAY_QUEUE_DIR         Local queue directory (default: per-user under
