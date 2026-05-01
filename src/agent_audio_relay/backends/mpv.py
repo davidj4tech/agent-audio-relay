@@ -97,6 +97,10 @@ class MpvBackend(PlaybackBackend):
         # deleted after play() returns, and mpv may not open append-play files
         # until after the IPC command has returned.
         if self.ipc_socket:
+            # Defensive unpause: a paused mpv with append-play queues new
+            # files behind the paused one, so the entire watcher queue
+            # silently stalls until someone manually resumes playback.
+            self._send_ipc(["set_property", "pause", False])
             resp = self._send_ipc(["loadfile", str(playable), "append-play"])
             if resp and resp.get("error") == "success":
                 return True
