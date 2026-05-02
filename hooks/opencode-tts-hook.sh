@@ -79,6 +79,12 @@ log() {
   printf '%s\n' "$line" | tee -a "$LOG_FILE"
 }
 
+cleanup_opencode_tmp_so() {
+  # opencode export currently leaks temp native .so files in /tmp.
+  # Keep /tmp from filling; the export process has exited by the time this runs.
+  find /tmp -maxdepth 1 -type f -user "$(id -un)" -name '.*-00000000.so' -size +1M -delete 2>/dev/null || true
+}
+
 strip_markdown() {
   printf '%s\n' "$1" \
     | sed 's/```[a-zA-Z0-9_-]*//g; s/```//g' \
@@ -289,6 +295,7 @@ while true; do
     mtime_set "$session_id" "$file_mtime"
   done
   shopt -u nullglob
+  cleanup_opencode_tmp_so
 
   sleep "$POLL_INTERVAL"
 done
