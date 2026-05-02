@@ -149,8 +149,20 @@ if [ -z "$transcript_path" ] || [ ! -f "$transcript_path" ]; then
     exit 0
 fi
 
-# Wait briefly for transcript to be flushed to disk
-sleep 0.5
+# Wait briefly for transcript to be flushed to disk. Tight retry instead of
+# a fixed sleep — saves up to ~0.4s on the common case where the transcript
+# is already on disk.
+transcript_mtime_ok() {
+    local now last
+    [ -s "$transcript_path" ] || return 1
+    now=$(date +%s)
+    last=$(stat -c %Y "$transcript_path" 2>/dev/null) || return 1
+    [ $((now - last)) -le 5 ]
+}
+for _ in 1 2 3 4 5; do
+    transcript_mtime_ok && break
+    sleep 0.1
+done
 
 # Extract all text blocks from the last assistant message that has text
 text=$(tac "$transcript_path" \
