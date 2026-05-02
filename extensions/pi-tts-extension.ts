@@ -14,6 +14,12 @@
  *   openai          — POSTs to https://api.openai.com/v1/audio/speech
  *                     using OPENAI_API_KEY. Voice: PI_TTS_VOICE (default "marin").
  *                     Falls back to edge if OpenAI TTS fails.
+ *   piper           — Local Piper via the Wyoming TCP protocol. Sub-200ms
+ *                     end-to-end synthesis on a typical clip. Writes WAV.
+ *                     Env: PI_TTS_PIPER_HOST (default 100.125.48.108 / homer),
+ *                          PI_TTS_PIPER_PORT (default 10200),
+ *                          PI_TTS_PIPER_VOICE (default en_US-amy-medium).
+ *                     Falls back to edge-mp3 if Piper is unreachable.
  *
  * Other env vars:
  *   PI_TTS_ENABLED        "0" disables (default: enabled)
@@ -28,6 +34,7 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { createConnection } from "node:net";
 import { join } from "node:path";
 import { userInfo } from "node:os";
 
@@ -137,6 +144,105 @@ function ttsEdge(text: string, outfile: string): Promise<void> {
 	});
 }
 
+// Wyoming protocol: \n-terminated JSON header, optionally followed by
+// `data_length` bytes of inline JSON metadata, then `payload_length` bytes
+// of binary payload. Modern piper-wyoming emits audio-start / audio-chunk /
+// audio-stop events; PCM lives in audio-chunk.payload.
+function ttsPiper(text: string, outfile: string): Promise<void> {
+	const host = process.env.PI_TTS_PIPER_HOST || "100.125.48.108";
+	const port = Number(process.env.PI_TTS_PIPER_PORT) || 10200;
+	const voice = process.env.PI_TTS_PIPER_VOICE || "en_US-amy-medium";
+	const timeoutMs = Number(process.env.PI_TTS_PIPER_TIMEOUT_MS) || 15000;
+
+	return new Promise((resolve, reject) => {
+		const sock = createConnection(port, host);
+		sock.setTimeout(timeoutMs);
+
+		let buf = Buffer.alloc(0);
+		const chunks: Buffer[] = [];
+		let rate = 22050, width = 2, channels = 1;
+		let done = false;
+
+		const finish = (err?: Error) => {
+			if (sock.destroyed) return;
+			sock.destroy();
+			if (err) return reject(err);
+			if (!chunks.length) return reject(new Error("piper produced no audio"));
+			const pcm = Buffer.concat(chunks);
+			const wav = wavWrap(pcm, rate, width, channels);
+			try { writeFileSync(outfile, wav); resolve(); }
+			catch (e) { reject(e as Error); }
+		};
+
+		sock.on("error", (e) => finish(e));
+		sock.on("timeout", () => finish(new Error("piper timeout")));
+		sock.on("close", () => { if (!done) finish(new Error("piper socket closed early")); });
+
+		sock.on("connect", () => {
+			const evt = { type: "synthesize", data: { text, voice: { name: voice } } };
+			sock.write(JSON.stringify(evt) + "\n");
+		});
+
+		sock.on("data", (data) => {
+			buf = Buffer.concat([buf, data]);
+			while (true) {
+				const nl = buf.indexOf(0x0a);
+				if (nl < 0) return;
+				let header: any;
+				try { header = JSON.parse(buf.subarray(0, nl).toString("utf8")); }
+				catch (e) { return finish(new Error("piper bad header")); }
+				const dlen = Number(header.data_length) || 0;
+				const plen = Number(header.payload_length) || 0;
+				const need = nl + 1 + dlen + plen;
+				if (buf.length < need) return;
+				let cur = nl + 1;
+				let inlineData: any = header.data || {};
+				if (dlen) {
+					try { inlineData = JSON.parse(buf.subarray(cur, cur + dlen).toString("utf8")); }
+					catch { /* ignore */ }
+					cur += dlen;
+				}
+				const payload = plen ? buf.subarray(cur, cur + plen) : null;
+				cur += plen;
+				buf = buf.subarray(cur);
+
+				const t = header.type;
+				if (t === "audio-start") {
+					rate = inlineData.rate || rate;
+					width = inlineData.width || width;
+					channels = inlineData.channels || channels;
+				} else if (t === "audio-chunk" && payload && payload.length) {
+					chunks.push(Buffer.from(payload));
+				} else if (t === "audio-stop") {
+					done = true;
+					finish();
+					return;
+				}
+			}
+		});
+	});
+}
+
+function wavWrap(pcm: Buffer, rate: number, width: number, channels: number): Buffer {
+	const byteRate = rate * channels * width;
+	const blockAlign = channels * width;
+	const header = Buffer.alloc(44);
+	header.write("RIFF", 0);
+	header.writeUInt32LE(36 + pcm.length, 4);
+	header.write("WAVE", 8);
+	header.write("fmt ", 12);
+	header.writeUInt32LE(16, 16);              // fmt chunk size
+	header.writeUInt16LE(1, 20);               // PCM
+	header.writeUInt16LE(channels, 22);
+	header.writeUInt32LE(rate, 24);
+	header.writeUInt32LE(byteRate, 28);
+	header.writeUInt16LE(blockAlign, 32);
+	header.writeUInt16LE(width * 8, 34);
+	header.write("data", 36);
+	header.writeUInt32LE(pcm.length, 40);
+	return Buffer.concat([header, pcm]);
+}
+
 // ---------- extension entrypoint -------------------------------------------
 
 export default function (pi: ExtensionAPI) {
@@ -157,7 +263,8 @@ export default function (pi: ExtensionAPI) {
 			mkdirSync(dropDir, { recursive: true });
 
 			const engine = (process.env.PI_TTS_ENGINE || "edge").toLowerCase();
-			const outfile = join(dropDir, `${makeStem("pi", "stop")}.mp3`);
+			const ext = engine === "piper" ? "wav" : "mp3";
+			const outfile = join(dropDir, `${makeStem("pi", "stop")}.${ext}`);
 
 			if (engine === "edge") {
 				await ttsEdge(text, outfile);
@@ -166,6 +273,13 @@ export default function (pi: ExtensionAPI) {
 					await ttsOpenAI(text, outfile);
 				} catch {
 					await ttsEdge(text, outfile);
+				}
+			} else if (engine === "piper") {
+				try {
+					await ttsPiper(text, outfile);
+				} catch {
+					// Fall back to edge-mp3 if Piper is unreachable
+					await ttsEdge(text, outfile.replace(/\.\w+$/, ".mp3"));
 				}
 			} else {
 				// Unknown engine: silent no-op (don't break the agent)
