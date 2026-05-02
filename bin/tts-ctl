@@ -13,7 +13,9 @@
 set -u
 PHONE_HOST="${CLAUDE_TTS_PHONE_HOST:-p8ar}"
 ARCHIVE_DIR="${CLAUDE_TTS_PHONE_ARCHIVE:-/data/data/com.termux/files/home/.cache/agent-audio}"
-EXT="${CLAUDE_TTS_EXT:-mp3}"
+# Audio extensions to try, in order. Pi-rp/Qwen produces wav; Claude/edge/openai
+# produce mp3. The first matching `latest{--session,}.{ext}` wins.
+EXTS=(${CLAUDE_TTS_EXT:-wav mp3 opus ogg})
 SOCK="${MPV_TTS_SOCK:-/data/data/com.termux/files/usr/tmp/mpv-tts.sock}"
 
 slug() {
@@ -43,13 +45,26 @@ replay_target() {
     if [ -z "$session" ] && [ -n "${TMUX_PANE:-}" ]; then
         session=$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)
     fi
+    local stem
     if [ -n "$session" ]; then
-        local s
-        s=$(slug "$session")
-        printf '%s' "$ARCHIVE_DIR/latest--${s}.$EXT"
+        stem="$ARCHIVE_DIR/latest--$(slug "$session")"
     else
-        printf '%s' "$ARCHIVE_DIR/latest.$EXT"
+        stem="$ARCHIVE_DIR/latest"
     fi
+    # Prefer a remote-existing match; mpv loadfile of a missing path is
+    # a silent no-op, which is worse UX than picking *something* and
+    # letting mpv error out visibly.
+    if [ -S "$SOCK" ]; then
+        for ext in "${EXTS[@]}"; do
+            [ -e "$stem.$ext" ] && { printf '%s' "$stem.$ext"; return; }
+        done
+    else
+        local probe
+        probe=$(ssh -o BatchMode=yes "$PHONE_HOST" "for e in ${EXTS[*]}; do [ -e \"$stem.\$e\" ] && { echo \"$stem.\$e\"; exit 0; }; done" 2>/dev/null)
+        [ -n "$probe" ] && { printf '%s' "$probe"; return; }
+    fi
+    # Nothing matched — fall back to the first ext, mpv will surface the error.
+    printf '%s' "$stem.${EXTS[0]}"
 }
 
 fmt_time() {
