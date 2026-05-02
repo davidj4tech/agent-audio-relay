@@ -22,7 +22,8 @@
  *                     Falls back to edge-mp3 if Piper is unreachable.
  *   qwen            — Alibaba DashScope Qwen TTS. High-quality natural voices.
  *                     Env: DASHSCOPE_API_KEY (required),
- *                          PI_TTS_QWEN_MODEL (default qwen3-tts-flash),
+ *                          PI_TTS_QWEN_MODEL (default qwen3-tts-flash-2025-11-27;
+ *                              the unversioned alias is unavailable on free-tier accounts),
  *                          PI_TTS_QWEN_VOICE (default Cherry; also Jada, Dylan),
  *                          PI_TTS_QWEN_LANG  (default English),
  *                          DASHSCOPE_BASE_URL (default https://dashscope-intl.aliyuncs.com/api/v1).
@@ -143,7 +144,9 @@ async function ttsQwen(text: string, outfile: string): Promise<void> {
 	const key = process.env.DASHSCOPE_API_KEY;
 	if (!key) throw new Error("DASHSCOPE_API_KEY not set");
 	const base = (process.env.DASHSCOPE_BASE_URL || "https://dashscope-intl.aliyuncs.com/api/v1").replace(/\/+$/, "");
-	const model = process.env.PI_TTS_QWEN_MODEL || "qwen3-tts-flash";
+	// DashScope only resolves the dated snapshot ids on free-tier accounts;
+	// the unversioned alias 'qwen3-tts-flash' returns AccessDenied.Unpurchased.
+	const model = process.env.PI_TTS_QWEN_MODEL || "qwen3-tts-flash-2025-11-27";
 	const voice = process.env.PI_TTS_QWEN_VOICE || "Cherry";
 	const language = process.env.PI_TTS_QWEN_LANG || "English";
 
@@ -299,7 +302,7 @@ export default function (pi: ExtensionAPI) {
 			mkdirSync(dropDir, { recursive: true });
 
 			const engine = (process.env.PI_TTS_ENGINE || "edge").toLowerCase();
-			const ext = engine === "piper" ? "wav" : "mp3";
+			const ext = (engine === "piper" || engine === "qwen") ? "wav" : "mp3";
 			const outfile = join(dropDir, `${makeStem("pi", "stop")}.${ext}`);
 
 			if (engine === "edge") {
