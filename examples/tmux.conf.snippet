@@ -1,0 +1,14 @@
+# agent-audio-relay tmux bindings
+# Source from your tmux config:
+#     source-file ~/path/to/agent-audio-relay/examples/tmux.conf.snippet
+#
+# `prefix T` enters the `tts` key table; subsequent keys:
+#   t      → interactive popup (Space toggle, r replay, h/l ±5s, H/L ±30s,
+#            -/= volume, p pause, R resume, q close)
+#   Space  → toggle play/pause (one-shot)
+#   r      → replay latest from current tmux session
+
+bind T switch-client -T tts
+bind -T tts t     display-popup -E -w 95% -h 7 "~/.local/bin/tts-popup"
+bind -T tts Space display-popup -E -w 95% -h 3 "~/.local/bin/tts-ctl toggle"
+bind -T tts r     display-popup -E -w 95% -h 3 "~/.local/bin/tts-ctl replay"

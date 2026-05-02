@@ -512,8 +512,9 @@ relay, that's the phone-side daemon you're talking to.
 ### Floating tmux popup
 
 `bin/tts-popup` is an interactive single-key controller meant to run
-inside `tmux display-popup -E`. Suggested bindings (in
-`~/.tmux.conf.local`):
+inside `tmux display-popup -E`. Drop these bindings into
+`~/.tmux.conf.local` (or `source-file` the shipped snippet at
+`examples/tmux.conf.snippet`):
 
 ```tmux
 bind T switch-client -T tts
