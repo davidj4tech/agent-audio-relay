@@ -20,6 +20,13 @@
  *                          PI_TTS_PIPER_PORT (default 10200),
  *                          PI_TTS_PIPER_VOICE (default en_US-amy-medium).
  *                     Falls back to edge-mp3 if Piper is unreachable.
+ *   qwen            — Alibaba DashScope Qwen TTS. High-quality natural voices.
+ *                     Env: DASHSCOPE_API_KEY (required),
+ *                          PI_TTS_QWEN_MODEL (default qwen3-tts-flash),
+ *                          PI_TTS_QWEN_VOICE (default Cherry; also Jada, Dylan),
+ *                          PI_TTS_QWEN_LANG  (default English),
+ *                          DASHSCOPE_BASE_URL (default https://dashscope-intl.aliyuncs.com/api/v1).
+ *                     Falls back to edge-tts if DashScope fails.
  *
  * Other env vars:
  *   PI_TTS_ENABLED        "0" disables (default: enabled)
@@ -130,6 +137,35 @@ async function ttsOpenAI(text: string, outfile: string): Promise<void> {
 	}
 	const buf = Buffer.from(await res.arrayBuffer());
 	writeFileSync(outfile, buf);
+}
+
+async function ttsQwen(text: string, outfile: string): Promise<void> {
+	const key = process.env.DASHSCOPE_API_KEY;
+	if (!key) throw new Error("DASHSCOPE_API_KEY not set");
+	const base = (process.env.DASHSCOPE_BASE_URL || "https://dashscope-intl.aliyuncs.com/api/v1").replace(/\/+$/, "");
+	const model = process.env.PI_TTS_QWEN_MODEL || "qwen3-tts-flash";
+	const voice = process.env.PI_TTS_QWEN_VOICE || "Cherry";
+	const language = process.env.PI_TTS_QWEN_LANG || "English";
+
+	const res = await fetch(`${base}/services/aigc/multimodal-generation/generation`, {
+		method: "POST",
+		headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+		body: JSON.stringify({ model, input: { text, voice, language_type: language } }),
+	});
+	if (!res.ok) {
+		const body = await res.text().catch(() => "");
+		throw new Error(`qwen tts http ${res.status}: ${body.slice(0, 200)}`);
+	}
+	const j: any = await res.json();
+	if (j.code && j.code !== "Success" && !JSON.stringify(j).includes("\"url\"")) {
+		throw new Error(`qwen dashscope error: ${JSON.stringify(j).slice(0, 200)}`);
+	}
+	const audioUrl = j?.output?.audio?.url || j?.output?.url || j?.url;
+	if (!audioUrl) throw new Error("qwen tts response missing audio url");
+
+	const audio = await fetch(audioUrl);
+	if (!audio.ok) throw new Error(`qwen tts download http ${audio.status}`);
+	writeFileSync(outfile, Buffer.from(await audio.arrayBuffer()));
 }
 
 function ttsEdge(text: string, outfile: string): Promise<void> {
@@ -280,6 +316,13 @@ export default function (pi: ExtensionAPI) {
 				} catch {
 					// Fall back to edge-mp3 if Piper is unreachable
 					await ttsEdge(text, outfile.replace(/\.\w+$/, ".mp3"));
+				}
+			} else if (engine === "qwen") {
+				try {
+					await ttsQwen(text, outfile);
+				} catch {
+					// Fall back to edge if DashScope fails
+					await ttsEdge(text, outfile);
 				}
 			} else {
 				// Unknown engine: silent no-op (don't break the agent)
