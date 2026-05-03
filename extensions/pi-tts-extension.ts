@@ -44,7 +44,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { join } from "node:path";
-import { userInfo } from "node:os";
+import { hostname, userInfo } from "node:os";
 
 // ---------- helpers ----------------------------------------------------------
 
@@ -73,12 +73,20 @@ function tmuxSessionName(): string {
 	return "";
 }
 
+// Slug the producing host's short hostname, lowercased — matches the
+// bash and Python implementations elsewhere in the project. The host
+// segment lets the playback side disambiguate same-named sessions
+// across multiple producer hosts.
+function hostSlug(): string {
+	return denoteSlug(hostname().split(".")[0].toLowerCase()) || "unknown";
+}
+
 function makeStem(agent: string, kind: string, sessionOverride?: string): string {
 	const ts = utcStamp();
 	const sessionRaw = sessionOverride || process.env.PI_SESSION || tmuxSessionName() || "";
 	const session = denoteSlug(sessionRaw) || "pi";
 	const persona = denoteSlug(userInfo().username || "unknown") || "unknown";
-	return `${ts}--${session}__${persona}_${denoteSlug(agent)}_${denoteSlug(kind)}`;
+	return `${ts}--${hostSlug()}--${session}__${persona}_${denoteSlug(agent)}_${denoteSlug(kind)}`;
 }
 
 function stripMarkdown(text: string): string {
