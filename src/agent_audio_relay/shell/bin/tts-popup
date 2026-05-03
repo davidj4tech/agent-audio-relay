@@ -1,8 +1,8 @@
 #!/bin/bash
 # Interactive tts-popup — meant to run inside `tmux display-popup -E`.
-# One-line layout (suitable for `display-popup -E -w 70% -h 3` or similar):
+# Designed as a compact top-right status overlay (~35 cols, 1 row):
 #
-#   aar  ▶ 00:08  ████░░░░░░░░░░░░░░░  00:41  vol=114
+#   ▶ 00:08 ████░░░░░░░░░░░ 00:55
 #
 # Single-key hotkeys (no on-screen hints — keep popup compact; see README):
 #   Space   toggle play/pause
@@ -172,8 +172,7 @@ draw() {
         state='▶'
     fi
     cols="${COLUMNS:-80}"
-    # Reserve space for: label (~15) + state (1) + " " + pos (5) + "  " +
-    # " " + dur (5) + "  " + vol_field (~9) + a couple of spacers ≈ 40.
+    # Reserve space for the surrounding label/time/vol text.
     barw=$(( cols - 40 ))
     [ "$barw" -lt 8 ] && barw=8
     [ "$barw" -gt 50 ] && barw=50

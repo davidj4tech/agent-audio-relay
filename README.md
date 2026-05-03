@@ -573,6 +573,36 @@ popup auto-closes `TTS_POPUP_AUTO_CLOSE` seconds after playback ends
 (default 10, set to 0 to disable). Width is given as a percentage so
 the popup fits on narrow displays (Termux on a phone).
 
+### Status-line integration
+
+For an always-on display that doesn't take a popup, add `tts-status-line`
+to your tmux `status-right`. It prints a compact one-liner while a clip
+is loaded and emits nothing when mpv is idle, so your normal clock /
+date / battery / whatever shows through unchanged the rest of the time.
+
+```tmux
+set -g status-interval 1
+set -g status-right '#(tts-status-line) #[fg=default] %H:%M  %d-%b'
+```
+
+Output during playback looks like:
+
+```
+▶ 00:08 ████░░░░░░░░ 00:55  12:34  03-May
+```
+
+(adds `[M]` if mpv is muted; `⏸` if paused; nothing at all if idle).
+
+Each invocation is one IPC round-trip via the `aar-mpv-tunnel` (~110ms
+on Tailscale). For oh-my-tmux users who keep customisations in
+`~/.tmux.conf.local`, append the snippet there rather than editing the
+upstream `~/.tmux.conf`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TTS_STATUS_BAR_WIDTH` | `12` | Width of the █░ progress bar |
+| `TTS_STATUS_HIDE_IDLE` | `1` | Set `0` to show `○` instead of empty when idle |
+
 ## Adding a new agent hook
 
 To add TTS for any new tool, write a script that:

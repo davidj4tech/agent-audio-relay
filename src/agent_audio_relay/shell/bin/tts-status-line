@@ -1,0 +1,92 @@
+#!/bin/bash
+# Compact one-line TTS status for tmux's status-right (or any always-on
+# status bar). Empty output when mpv is idle, so the surrounding
+# status-right content (date/time/whatever) is unchanged when nothing
+# is playing.
+#
+# When a clip is loaded, prints something like:
+#     ▶ 00:08 ████░░░░░░░░ 00:55
+# or with mute:
+#     ▶ 00:08 ████░░░░░░░░ 00:55 [M]
+#
+# Suggested tmux integration (add to ~/.tmux.conf.local):
+#     set -g status-interval 1
+#     set -g status-right '#(tts-status-line) #[fg=default] %H:%M  %d-%b'
+#
+# `status-interval 1` makes tmux re-run the command every second so the
+# bar progresses smoothly. Each invocation is one IPC round-trip via
+# the aar-mpv-tunnel (~110ms over Tailscale; fast enough for 1s
+# refresh). If tmux's blocking on slow `#()` invocations becomes a
+# problem, run a separate cache daemon and `cat` from there.
+#
+# Env:
+#   TTS_STATUS_BAR_WIDTH   Width of the █░ progress bar (default: 12)
+#   TTS_CTL                Path to tts-ctl (default: tts-ctl from PATH)
+#   TTS_STATUS_HIDE_IDLE   If "0", emit "○" even when idle (default: "1")
+
+set -u
+TTS_CTL="${TTS_CTL:-tts-ctl}"
+BAR_WIDTH="${TTS_STATUS_BAR_WIDTH:-12}"
+HIDE_IDLE="${TTS_STATUS_HIDE_IDLE:-1}"
+
+mapfile -t v < <("$TTS_CTL" get pause idle-active time-pos duration mute 2>/dev/null)
+paused="${v[0]:-}"
+idle="${v[1]:-}"
+pos="${v[2]:-}"
+dur="${v[3]:-}"
+mute="${v[4]:-}"
+
+# Idle / no-state: emit nothing by default so the surrounding status-right
+# content (clock, etc.) shows through unchanged.
+if [ "$idle" = "true" ] || [ -z "$paused" ]; then
+    [ "$HIDE_IDLE" = "1" ] && exit 0
+    printf '○'
+    exit 0
+fi
+
+if [ "$paused" = "true" ]; then
+    state='⏸'
+else
+    state='▶'
+fi
+
+fmt_time() {
+    local t="$1"
+    if [ -z "$t" ] || [ "$t" = "null" ]; then
+        printf '%s' '--:--'
+        return
+    fi
+    awk -v t="$t" 'BEGIN{ s=int(t); printf "%02d:%02d", s/60, s%60 }'
+}
+
+bar() {
+    local pos="$1" dur="$2" width="$3" filled empty pad fill rest
+    if [ -z "$pos" ] || [ -z "$dur" ] || [ "$pos" = "null" ] || [ "$dur" = "null" ]; then
+        printf -v pad '%*s' "$width" ''
+        printf '%s' "${pad// /─}"
+        return
+    fi
+    filled=$(awk -v p="$pos" -v d="$dur" -v w="$width" \
+        'BEGIN{ if(d<=0){print 0; exit} f=int((p/d)*w); if(f<0)f=0; if(f>w)f=w; print f }')
+    empty=$((width - filled))
+    fill=""; rest=""
+    if [ "$filled" -gt 0 ]; then
+        printf -v pad '%*s' "$filled" ''
+        fill="${pad// /█}"
+    fi
+    if [ "$empty" -gt 0 ]; then
+        printf -v pad '%*s' "$empty" ''
+        rest="${pad// /░}"
+    fi
+    printf '%s%s' "$fill" "$rest"
+}
+
+mute_suffix=""
+[ "$mute" = "true" ] && mute_suffix=' [M]'
+
+printf '%s %s %s %s%s' \
+    "$state" \
+    "$(fmt_time "$pos")" \
+    "$(bar "$pos" "$dur" "$BAR_WIDTH")" \
+    "$(fmt_time "$dur")" \
+    "$mute_suffix"
