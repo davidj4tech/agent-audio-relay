@@ -15,10 +15,13 @@
 #   h / l   seek -5s / +5s
 #   H / L   seek -30s / +30s
 #   - / =   volume -5 / +5
+#   p       alternate to Space (mpv default)
+#   1-9     seek to N×10% of current clip (mpv/VLC default)
 #   m       toggle mute
 #   [ / ]   slower / faster (speed × 1/1.1 / × 1.1)
 #   < / >   previous / next clip in this session's archive
 #   Del/BS  reset speed to 1.0
+#   i       show clip info (pos/dur/path) in tmux status line
 #   ?       show keymap in tmux status line
 #   q / Esc close
 #
@@ -395,7 +398,7 @@ while true; do
     # picks up the resulting state change. We also set LAST_KEY so the
     # next draw can show a brief "you pressed X" indicator.
     case "$key" in
-        ' ') "$TTS_CTL" toggle "$SESSION" >/dev/null 2>&1 & disown
+        ' '|p) "$TTS_CTL" toggle "$SESSION" >/dev/null 2>&1 & disown
              LOAD_PENDING_SINCE=$SECONDS; LAST_KEY="space" ;;
         r)   "$TTS_CTL" replay "$SESSION" >/dev/null 2>&1 & disown
              LOAD_PENDING_SINCE=$SECONDS; LAST_KEY="replay" ;;
@@ -414,6 +417,30 @@ while true; do
         '>') "$TTS_CTL" next "$SESSION" >/dev/null 2>&1 & disown
              LOAD_PENDING_SINCE=$SECONDS; LAST_KEY="next" ;;
         DELETE|$'\b'|$'\x7f') "$TTS_CTL" speed 1 >/dev/null 2>&1 & disown; LAST_KEY="speed=1" ;;
+        # mpv/VLC convention: digits 1-9 jump to N×10% of the clip.
+        # 0 stays as seek-to-start (which is also 0% — consistent).
+        1) "$TTS_CTL" seek-percent 10 >/dev/null 2>&1 & disown; LAST_KEY="10%" ;;
+        2) "$TTS_CTL" seek-percent 20 >/dev/null 2>&1 & disown; LAST_KEY="20%" ;;
+        3) "$TTS_CTL" seek-percent 30 >/dev/null 2>&1 & disown; LAST_KEY="30%" ;;
+        4) "$TTS_CTL" seek-percent 40 >/dev/null 2>&1 & disown; LAST_KEY="40%" ;;
+        5) "$TTS_CTL" seek-percent 50 >/dev/null 2>&1 & disown; LAST_KEY="50%" ;;
+        6) "$TTS_CTL" seek-percent 60 >/dev/null 2>&1 & disown; LAST_KEY="60%" ;;
+        7) "$TTS_CTL" seek-percent 70 >/dev/null 2>&1 & disown; LAST_KEY="70%" ;;
+        8) "$TTS_CTL" seek-percent 80 >/dev/null 2>&1 & disown; LAST_KEY="80%" ;;
+        9) "$TTS_CTL" seek-percent 90 >/dev/null 2>&1 & disown; LAST_KEY="90%" ;;
+        i)
+            # Clip info dump in the tmux status line. Reads cached state
+            # so this doesn't add an IPC round-trip.
+            [ -s "$STATE_FILE" ] && mapfile -t STATE < "$STATE_FILE"
+            _pos=$(fmt_time "${STATE[2]:-}")
+            _dur=$(fmt_time "${STATE[3]:-}")
+            _path="${STATE[5]:-}"
+            _base="${_path##*/}"
+            tmux display-message -d 5000 \
+                "tts: ${SESSION:-?}  ${_pos}/${_dur}  vol=${STATE[4]%.*}  ${_base}" \
+                2>/dev/null
+            LAST_KEY="info"
+            ;;
         '?')
             LAST_KEY="help"
             # Help via tmux's display-message. Nested display-popup from
@@ -423,8 +450,8 @@ while true; do
             # message shows in the status area without nesting and with no
             # geometry constraints. -d 0 means "stay until cleared by next
             # status update" (which happens within status-interval).
-            tmux display-message -d 8000 \
-                "tts: Space=togl r=replay 0=start h/l=±5s H/L=±30s -/=vol m=mute [/]=speed </>=prev/next Del=spd1 q=quit" \
+            tmux display-message -d 9000 \
+                "tts: Spc/p=togl r=replay 0=start 1-9=seek% h/l=±5s H/L=±30s -/=vol m=mute [/]=speed </>=prev/next Del=spd1 i=info q=quit" \
                 2>/dev/null
             ;;
         q|$'\e') exit 0 ;;

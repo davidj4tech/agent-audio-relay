@@ -266,6 +266,7 @@ case "${1:-}" in
         # else: no clip for this session — silent no-op, popup surfaces it.
         ;;
     seek)    mpv_cmd "{\"command\":[\"seek\",${2:-5},\"relative\"]}"   >/dev/null ;;
+    seek-percent) mpv_cmd "{\"command\":[\"seek\",${2:-50},\"absolute-percent\"]}" >/dev/null ;;
     start)   mpv_cmd '{"command":["seek",0,"absolute"]}'               >/dev/null ;;
     volume)  mpv_cmd "{\"command\":[\"add\",\"volume\",${2:-5}]}"      >/dev/null ;;
     mute)    mpv_cmd '{"command":["cycle","mute"]}'                    >/dev/null ;;
