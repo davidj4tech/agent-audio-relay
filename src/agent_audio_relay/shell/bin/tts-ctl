@@ -171,10 +171,14 @@ replay_target() {
         # shellcheck disable=SC2086
         probe=$(ssh ${TTS_SSH_DEFAULTS} ${CLAUDE_TTS_SSH_OPTS:-} "$PHONE_HOST" \
             "bash -c $(printf '%q' "$probe_script")" 2>/dev/null)
-        [ -n "$probe" ] && { printf '%s' "$probe"; return; }
+        [ -n "$probe" ] && { printf '%s' "$probe"; return 0; }
     fi
-    # Nothing matched — fall back to the highest-priority stem, first ext.
-    printf '%s' "${candidates[0]:-$ARCHIVE_DIR/latest}.${EXTS[0]}"
+    # Nothing matched. Return non-zero with no output so callers can
+    # distinguish "no clip exists for this session" from "found one" —
+    # firing mpv loadfile on a synthetic non-existent path was worse:
+    # mpv either silently no-op'd or unloaded the previous clip,
+    # leaving the user mid-action with no audio and no feedback.
+    return 1
 }
 
 fmt_time() {
@@ -216,26 +220,42 @@ case "${1:-}" in
             case "$_curbase" in
                 latest--"$_sslug".*|latest--*--"$_sslug".*|latest--"$_sslug"__*) ;;
                 *)
-                    # Path doesn't look like a symlink for this session — resolve
-                    # target and compare strictly. (Covers archive-file paths
-                    # written before the loadfile-via-symlink change.)
-                    _target=$(replay_target "$_sess")
-                    [ "$_cur" != "$_target" ] && _need_reload=1
+                    # Path doesn't look like a symlink for this session.
+                    # Resolve target and compare. If no clip exists for this
+                    # session, _target stays empty and we'll fall through to
+                    # cycle pause below — better than firing loadfile of a
+                    # synthetic path that breaks mpv's state.
+                    _target=$(replay_target "$_sess") || _target=""
+                    [ -n "$_target" ] && [ "$_cur" != "$_target" ] && _need_reload=1
                     ;;
             esac
         fi
         if [ "$_need_reload" = "1" ]; then
-            : "${_target:=$(replay_target "$_sess")}"
-            mpv_cmd "{\"command\":[\"loadfile\",\"$_target\",\"replace\"]}" >/dev/null
-            mpv_cmd '{"command":["set_property","pause",false]}'            >/dev/null
+            if [ -z "${_target:-}" ]; then
+                _target=$(replay_target "$_sess") || _target=""
+            fi
+            if [ -n "$_target" ]; then
+                mpv_cmd "{\"command\":[\"loadfile\",\"$_target\",\"replace\"]}" >/dev/null
+                mpv_cmd '{"command":["set_property","pause",false]}'            >/dev/null
+            elif [ -n "$_cur" ]; then
+                # No clip found for this session, but mpv has something loaded —
+                # cycle pause on it so Space still gives audible feedback rather
+                # than silently breaking. Popup will surface "(no clip for
+                # session: X)" via its load-pending timer.
+                mpv_cmd '{"command":["cycle","pause"]}' >/dev/null
+            fi
+            # else: idle and no clip — nothing to do. Popup shows the
+            #       "(no clip for session: X)" message after 2s.
         else
             mpv_cmd '{"command":["cycle","pause"]}' >/dev/null
         fi
         ;;
     replay)
-        target=$(replay_target "${2:-}")
-        mpv_cmd "{\"command\":[\"loadfile\",\"$target\",\"replace\"]}" >/dev/null
-        mpv_cmd '{"command":["set_property","pause",false]}'           >/dev/null
+        if target=$(replay_target "${2:-}") && [ -n "$target" ]; then
+            mpv_cmd "{\"command\":[\"loadfile\",\"$target\",\"replace\"]}" >/dev/null
+            mpv_cmd '{"command":["set_property","pause",false]}'           >/dev/null
+        fi
+        # else: no clip for this session — silent no-op, popup surfaces it.
         ;;
     seek)    mpv_cmd "{\"command\":[\"seek\",${2:-5},\"relative\"]}"   >/dev/null ;;
     start)   mpv_cmd '{"command":["seek",0,"absolute"]}'               >/dev/null ;;
