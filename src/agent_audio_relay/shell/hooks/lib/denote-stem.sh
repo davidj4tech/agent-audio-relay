@@ -5,12 +5,19 @@
 #   source "$(dirname "$0")/lib/denote-stem.sh"
 #   stem=$(make_stem <agent> <kind> [session_override])
 #
-# Produces: YYYYMMDDTHHMMSS--<session>__<persona>_<agent>_<kind>
+# Produces: YYYYMMDDTHHMMSS--<host>--<session>__<persona>_<agent>_<kind>
 #
 # - agent:  hook identifier (claude, codex, opencode, ha)
 # - kind:   event type (stop, notif, announce, etc.)
+# - host:   short hostname of the *producing* machine, slugged
 # - session: explicit override; else tmux session name; else "nosession"
 # - persona: $USER
+#
+# The host segment is encoded by the producer (not the relay) so two hosts
+# with the same session name don't overwrite each other's symlinks on the
+# playback host. Backends parse the host from this stem rather than calling
+# gethostname() at archive time (which would always be the relay's hostname,
+# useless for cross-host disambiguation).
 #
 # All components are sanitised to [A-Za-z0-9-] so the stem is safe as a
 # filename on every target filesystem (incl. Android/Termux).
@@ -42,5 +49,10 @@ make_stem() {
     persona=$(_denote_slug "${USER:-unknown}")
     [ -z "$persona" ] && persona="unknown"
 
-    printf '%s--%s__%s_%s_%s' "$ts" "$session" "$persona" "$(_denote_slug "$agent")" "$(_denote_slug "$kind")"
+    local host=""
+    host=$(hostname -s 2>/dev/null | tr 'A-Z' 'a-z')
+    host=$(_denote_slug "$host")
+    [ -z "$host" ] && host="unknown"
+
+    printf '%s--%s--%s__%s_%s_%s' "$ts" "$host" "$session" "$persona" "$(_denote_slug "$agent")" "$(_denote_slug "$kind")"
 }

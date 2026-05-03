@@ -59,22 +59,33 @@ fmt_time() {
     awk -v t="$t" 'BEGIN{ s=int(t); printf "%02d:%02d", s/60, s%60 }'
 }
 
-# Path → display label.
-#   latest.<ext>                       → "global"
-#   latest--<host>--<session>.<ext>    → "<session>"   (host-namespaced)
-#   latest--<session>.<ext>            → "<session>"   (legacy / cross-host)
-#   anything else                      → basename without extension
+# Path → display label. Handles every shape mpv may report:
+#   latest.<ext>                                      → "global"
+#   latest--<host>--<session>.<ext>                   → "<session>"
+#   latest--<session>.<ext>                           → "<session>"
+#   latest--<session>__<agent>.<ext>                  → "<session>"
+#   <ts>--<host>--<session>__<persona>_<agent>_...    → "<session>"
+#   <ts>--<session>__<persona>_<agent>_<kind>.<ext>   → "<session>"  (legacy)
+#   anything else                                     → basename, no ext
 nowplaying_label() {
-    local path="$1" base
+    local path="$1" base left session
     [ -z "$path" ] || [ "$path" = "null" ] && { printf '(idle)'; return; }
     base="${path##*/}"
     base="${base%.*}"
-    case "$base" in
-        latest)         printf 'global' ;;
-        latest--*--*)   printf '%s' "${base##*--}" ;;
-        latest--*)      printf '%s' "${base#latest--}" ;;
-        *)              printf '%s' "$base" ;;
-    esac
+    if [ "$base" = "latest" ]; then
+        printf 'global'
+        return
+    fi
+    # Strip everything from `__` onward (persona/agent/kind), then take
+    # the last `--` segment. Works for both `latest--…--<session>` symlinks
+    # and raw `<ts>--…--<session>__…` archive filenames.
+    left="${base%%__*}"
+    session="${left##*--}"
+    if [ -n "$session" ] && [ "$session" != "$base" ]; then
+        printf '%s' "$session"
+    else
+        printf '%s' "$base"
+    fi
 }
 
 bar() {

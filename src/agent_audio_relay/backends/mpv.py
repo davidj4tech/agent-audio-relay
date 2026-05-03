@@ -15,16 +15,10 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import socket
 import subprocess
 import time
 from pathlib import Path
-
-
-def _host_slug() -> str:
-    raw = socket.gethostname().split(".", 1)[0].lower()
-    return re.sub(r"-+", "-", re.sub(r"[^a-z0-9-]+", "-", raw)).strip("-")
 
 from .base import PlaybackBackend, original_name
 
@@ -89,24 +83,41 @@ class MpvBackend(PlaybackBackend):
                 _shutil.copy2(str(path), str(archive))
         except OSError:
             return path
-        # Build pointer set: global, per-session, host-namespaced. Mirrors
-        # the layout ssh_termux writes so `tts-ctl replay_target` can resolve
-        # session-scoped audio regardless of which backend produced the clip.
-        # Filename stem format: <ts>--<session>__<persona>_<agent>_<kind>
+        # Build pointer set: global, per-session, host-namespaced,
+        # per-session__agent. Mirrors the layout ssh_termux writes so
+        # `tts-ctl replay_target` can resolve session-scoped audio
+        # regardless of which backend produced the clip.
+        #
+        # Stem (current):  <ts>--<host>--<session>__<persona>_<agent>_<kind>
+        # Stem (legacy):   <ts>--<session>__<persona>_<agent>_<kind>
+        # The host is parsed *from the stem* (the producer's hostname),
+        # not from socket.gethostname() at archive time (which would be
+        # the relay host — useless for cross-host disambiguation).
         ext = path.suffix
         links = [state / f"latest{ext}"]
         stem = archive.stem
+        host_in_stem = ""
+        session = ""
+        agent = ""
         if "--" in stem and "__" in stem:
             try:
                 after_ts = stem.split("--", 1)[1]
-                session, _ = after_ts.split("__", 1)
+                left, rest = after_ts.split("__", 1)
+                if "--" in left:
+                    host_in_stem, session = left.split("--", 1)
+                else:
+                    session = left
+                parts = rest.split("_")
+                if len(parts) >= 3:
+                    agent = parts[-2]
             except ValueError:
                 session = ""
-            if session:
-                host = _host_slug()
-                if host:
-                    links.append(state / f"latest--{host}--{session}{ext}")
-                links.append(state / f"latest--{session}{ext}")
+        if session:
+            if host_in_stem:
+                links.append(state / f"latest--{host_in_stem}--{session}{ext}")
+            links.append(state / f"latest--{session}{ext}")
+            if agent:
+                links.append(state / f"latest--{session}__{agent}{ext}")
         for lnk in links:
             lnk.unlink(missing_ok=True)
             try:

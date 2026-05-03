@@ -31,24 +31,10 @@ Environment variables:
 from __future__ import annotations
 
 import os
-import re
 import shlex
-import socket
 import subprocess
 import time
 from pathlib import Path
-
-
-def _host_slug() -> str:
-    """Slug the local hostname the same way `tts-ctl` will on replay.
-
-    Two hosts emitting clips for tmux sessions with the same name (e.g. both
-    have `main`) would otherwise overwrite each other's `latest--<session>`
-    symlink on the phone. Adding a `latest--<host>--<session>` symlink and
-    preferring it on replay disambiguates them.
-    """
-    raw = socket.gethostname().split(".", 1)[0].lower()
-    return re.sub(r"-+", "-", re.sub(r"[^a-z0-9-]+", "-", raw)).strip("-")
 
 from .base import PlaybackBackend, original_name
 
@@ -181,36 +167,42 @@ class SshTermuxBackend(PlaybackBackend):
         self._maybe_switch_bt()
         ext = path.suffix.lstrip(".")
         name = original_name(path)
-        archive = f".cache/agent-audio/{name}"
+        # Realigned to match the mpv backend's archive dir so tts-ctl reads
+        # one canonical location regardless of which backend played the clip.
+        archive_dir = ".local/state/agent-audio-relay"
+        archive = f"{archive_dir}/{name}"
 
-        # Build latest pointers: global + per-session (+ per-session__agent).
-        # Stem: YYYYMMDDTHHMMSS--<session>__<persona>_<agent>_<kind>
-        links = [f".cache/agent-audio/latest.{ext}"]
+        # Build latest pointers: global + per-session + host-namespaced
+        # + per-session__agent. Stem (current):
+        #   YYYYMMDDTHHMMSS--<host>--<session>__<persona>_<agent>_<kind>
+        # Stem (legacy, no host segment):
+        #   YYYYMMDDTHHMMSS--<session>__<persona>_<agent>_<kind>
+        links = [f"{archive_dir}/latest.{ext}"]
         stem = Path(name).stem
         if "--" in stem and "__" in stem:
             try:
                 after_ts = stem.split("--", 1)[1]
-                session, rest = after_ts.split("__", 1)
+                left, rest = after_ts.split("__", 1)
+                if "--" in left:
+                    host_in_stem, session = left.split("--", 1)
+                else:
+                    host_in_stem, session = "", left
                 parts = rest.split("_")
                 if session:
-                    host = _host_slug()
-                    if host:
-                        # Host-prefixed pointer: tts-ctl's replay_target prefers
-                        # this so cross-host session-name collisions don't pick
-                        # up a clip from another machine.
-                        links.append(f".cache/agent-audio/latest--{host}--{session}.{ext}")
-                    links.append(f".cache/agent-audio/latest--{session}.{ext}")
+                    if host_in_stem:
+                        links.append(f"{archive_dir}/latest--{host_in_stem}--{session}.{ext}")
+                    links.append(f"{archive_dir}/latest--{session}.{ext}")
                     if len(parts) >= 3:
                         agent = parts[-2]
                         if agent:
-                            links.append(f".cache/agent-audio/latest--{session}__{agent}.{ext}")
+                            links.append(f"{archive_dir}/latest--{session}__{agent}.{ext}")
             except ValueError:
                 pass
         ln_cmds = " && ".join(f"ln -sf '{name}' '{lnk}'" for lnk in links)
 
         for attempt in range(1, self.max_retries + 1):
             try:
-                self._ssh("mkdir -p .cache/agent-audio")
+                self._ssh(f"mkdir -p {archive_dir}")
                 subprocess.run(
                     ["scp", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
                      str(path), f"{self.host}:{archive}"],
