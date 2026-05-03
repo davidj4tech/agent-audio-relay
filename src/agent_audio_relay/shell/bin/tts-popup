@@ -50,7 +50,7 @@ cat > "$HELP_FILE" <<'EOF'
 
  Status bar shows live progress.
 
- press any key to dismiss
+ press Esc to dismiss this help
 EOF
 
 # Pin the popup to a specific tmux session so toggle/replay always target
