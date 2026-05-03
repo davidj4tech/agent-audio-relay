@@ -89,9 +89,13 @@ replay_target() {
         hslug=$(host_slug)
         [ -n "$hslug" ] && candidates+=("$ARCHIVE_DIR/latest--$hslug--$sslug")
         candidates+=("$ARCHIVE_DIR/latest--$sslug")
-    else
-        candidates+=("$ARCHIVE_DIR/latest")
     fi
+    # Global `latest` is the final fallback: better to replay *something*
+    # than silently no-op when no session-specific clip exists yet
+    # (e.g. a tmux session that hasn't had any TTS output since the
+    # host-namespacing change shipped). The popup label will show "global"
+    # so the user can see they got the fallback rather than session audio.
+    candidates+=("$ARCHIVE_DIR/latest")
     # Prefer a remote-existing match; mpv loadfile of a missing path is
     # a silent no-op, which is worse UX than picking *something* and
     # letting mpv error out visibly.
