@@ -12,7 +12,12 @@
 #   3. global latest
 set -u
 PHONE_HOST="${CLAUDE_TTS_PHONE_HOST:-p8ar}"
-ARCHIVE_DIR="${CLAUDE_TTS_PHONE_ARCHIVE:-/data/data/com.termux/files/home/.cache/agent-audio}"
+# Default to the mpv-backend's archive (XDG_STATE_HOME/agent-audio-relay).
+# That's where the running agent-audio-relay service on the phone writes
+# clips it played. The legacy `.cache/agent-audio` path was the
+# ssh-termux-backend's destination — only relevant in setups that bypass
+# the relay service. Override with CLAUDE_TTS_PHONE_ARCHIVE if needed.
+ARCHIVE_DIR="${CLAUDE_TTS_PHONE_ARCHIVE:-/data/data/com.termux/files/home/.local/state/agent-audio-relay}"
 # Audio extensions to try, in order. Pi-rp/Qwen produces wav; Claude/edge/openai
 # produce mp3. The first matching `latest{--session,}.{ext}` wins.
 EXTS=(${CLAUDE_TTS_EXT:-wav mp3 opus ogg})
@@ -97,6 +102,13 @@ replay_target() {
     # Prefer a remote-existing match; mpv loadfile of a missing path is
     # a silent no-op, which is worse UX than picking *something* and
     # letting mpv error out visibly.
+    #
+    # Probe order:
+    #   1. The candidate symlinks (`latest--<host>--<session>` then
+    #      `latest--<session>`) — fast, deterministic, handles current
+    #      cross-session collisions.
+    #   2. Glob fallback for historical clips that pre-date the per-session
+    #      symlink writes: most-recent `*--<session>__*.<ext>` by mtime.
     if [ -S "$SOCK" ]; then
         local stem
         for stem in "${candidates[@]}"; do
@@ -104,19 +116,34 @@ replay_target() {
                 [ -e "$stem.$ext" ] && { printf '%s' "$stem.$ext"; return; }
             done
         done
+        if [ -n "$session" ]; then
+            local newest
+            for ext in "${EXTS[@]}"; do
+                newest=$(ls -t1 "$ARCHIVE_DIR"/*--"$sslug"__*."$ext" 2>/dev/null | head -n1)
+                [ -n "$newest" ] && { printf '%s' "$newest"; return; }
+            done
+        fi
     else
-        # Single ssh call probes every (stem, ext) pair in priority order.
+        # Single ssh call: probe symlink candidates in priority order, then
+        # fall through to a most-recent glob match for the session.
         local probe_script="" stem
         for stem in "${candidates[@]}"; do
             probe_script+="for e in ${EXTS[*]}; do [ -e \"$stem.\$e\" ] && { echo \"$stem.\$e\"; exit 0; }; done; "
         done
+        if [ -n "$session" ]; then
+            local globs="" ext
+            for ext in "${EXTS[@]}"; do
+                globs+="$ARCHIVE_DIR/*--$sslug__*.$ext "
+            done
+            probe_script+="ls -t1 $globs 2>/dev/null | head -n1"
+        fi
         local probe
         # shellcheck disable=SC2086
         probe=$(ssh -o BatchMode=yes ${CLAUDE_TTS_SSH_OPTS:-} "$PHONE_HOST" "$probe_script" 2>/dev/null)
         [ -n "$probe" ] && { printf '%s' "$probe"; return; }
     fi
     # Nothing matched — fall back to the highest-priority stem, first ext.
-    printf '%s' "${candidates[0]}.${EXTS[0]}"
+    printf '%s' "${candidates[0]:-$ARCHIVE_DIR/latest}.${EXTS[0]}"
 }
 
 fmt_time() {

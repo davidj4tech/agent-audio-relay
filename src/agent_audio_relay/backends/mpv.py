@@ -15,10 +15,16 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import subprocess
 import time
 from pathlib import Path
+
+
+def _host_slug() -> str:
+    raw = socket.gethostname().split(".", 1)[0].lower()
+    return re.sub(r"-+", "-", re.sub(r"[^a-z0-9-]+", "-", raw)).strip("-")
 
 from .base import PlaybackBackend, original_name
 
@@ -83,12 +89,30 @@ class MpvBackend(PlaybackBackend):
                 _shutil.copy2(str(path), str(archive))
         except OSError:
             return path
-        link = state / f"latest{path.suffix}"
-        link.unlink(missing_ok=True)
-        try:
-            link.symlink_to(archive.name)
-        except OSError:
-            pass
+        # Build pointer set: global, per-session, host-namespaced. Mirrors
+        # the layout ssh_termux writes so `tts-ctl replay_target` can resolve
+        # session-scoped audio regardless of which backend produced the clip.
+        # Filename stem format: <ts>--<session>__<persona>_<agent>_<kind>
+        ext = path.suffix
+        links = [state / f"latest{ext}"]
+        stem = archive.stem
+        if "--" in stem and "__" in stem:
+            try:
+                after_ts = stem.split("--", 1)[1]
+                session, _ = after_ts.split("__", 1)
+            except ValueError:
+                session = ""
+            if session:
+                host = _host_slug()
+                if host:
+                    links.append(state / f"latest--{host}--{session}{ext}")
+                links.append(state / f"latest--{session}{ext}")
+        for lnk in links:
+            lnk.unlink(missing_ok=True)
+            try:
+                lnk.symlink_to(archive.name)
+            except OSError:
+                pass
         return archive
 
     def play(self, path: Path) -> bool:
