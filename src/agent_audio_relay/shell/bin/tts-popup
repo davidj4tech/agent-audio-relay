@@ -31,6 +31,9 @@ fi
 # a working ControlMaster for the phone host, reuse it (do nothing).
 # Otherwise open one for the popup's lifetime.
 _SOCK="${MPV_TTS_SOCK:-/data/data/com.termux/files/usr/tmp/mpv-tts.sock}"
+_CTL_DIR=""
+_CTL_PATH=""
+_PHONE_HOST=""
 if [ ! -S "$_SOCK" ]; then
     _PHONE_HOST="${CLAUDE_TTS_PHONE_HOST:-p8ar}"
     if ! ssh -o BatchMode=yes -O check "$_PHONE_HOST" 2>/dev/null; then
@@ -43,12 +46,13 @@ if [ ! -S "$_SOCK" ]; then
                 "$_PHONE_HOST" 2>/dev/null \
             && [ -S "$_CTL_PATH" ]; then
             export CLAUDE_TTS_SSH_OPTS="-o ControlPath=$_CTL_PATH"
-            trap 'ssh -O exit -o ControlPath="$_CTL_PATH" "$_PHONE_HOST" 2>/dev/null; rm -rf "$_CTL_DIR"' EXIT
         else
             rm -rf "$_CTL_DIR"
+            _CTL_DIR=""; _CTL_PATH=""
         fi
     fi
 fi
+# Single EXIT trap below also tears down the ssh ControlMaster (if any).
 
 fmt_time() {
     local t="$1"
@@ -109,11 +113,15 @@ draw() {
     # the next IPC round-trip is in flight — `clear` blanked the screen
     # for the full ~RTT, producing visible flashing.
     printf '\033[H'
-    local v paused idle pos dur vol path mute state cols barw
-    mapfile -t v < <("$TTS_CTL" get pause idle-active time-pos duration volume path mute 2>/dev/null)
-    paused="${v[0]:-}"; idle="${v[1]:-}"; pos="${v[2]:-}"
-    dur="${v[3]:-}";    vol="${v[4]:-}";  path="${v[5]:-}"
-    mute="${v[6]:-}"
+    local paused idle pos dur vol path mute state cols barw
+    # Read whatever the background fetcher most recently wrote. Stays
+    # non-blocking so keypresses are never gated on an in-flight ssh RTT.
+    if [ -s "$STATE_FILE" ]; then
+        mapfile -t STATE < "$STATE_FILE"
+    fi
+    paused="${STATE[0]:-}"; idle="${STATE[1]:-}"; pos="${STATE[2]:-}"
+    dur="${STATE[3]:-}";    vol="${STATE[4]:-}";  path="${STATE[5]:-}"
+    mute="${STATE[6]:-}"
     IDLE="$idle"
     if [ "$idle" = "true" ] || [ -z "$paused" ]; then
         state='○ idle    '
@@ -164,7 +172,8 @@ draw() {
     printf '\033[J'
 }
 
-REFRESH="${TTS_POPUP_REFRESH:-1}"
+REFRESH="${TTS_POPUP_REFRESH:-1}"     # how often the background fetcher polls mpv
+TICK="${TTS_POPUP_TICK:-0.15}"         # main-loop keypress timeout (UI responsiveness floor)
 AUTO_CLOSE_IDLE="${TTS_POPUP_AUTO_CLOSE:-10}"
 
 # Auto-close state: only fire after we've actually seen mpv playing, so
@@ -176,6 +185,47 @@ IDLE_SINCE=
 # once mpv reports non-idle. If still idle 2s later, draw() shows
 # "(no clip for session: ...)" so the user sees Space did *something*.
 LOAD_PENDING_SINCE=
+
+# State cache shared with the background fetcher. The fetcher does the
+# slow ssh+IPC round-trip (~700ms over Tailscale to the phone) while the
+# main loop reads stale-but-cached state non-blockingly — keypress
+# response is gated on $TICK (~150ms), not on the IPC RTT.
+STATE_FILE=$(mktemp -t tts-popup-state.XXXXXX)
+declare -a STATE
+
+# Refetch state out-of-band. Used both by the periodic fetcher and as a
+# kick after every keypress (so the display updates promptly once the
+# action's effect lands on mpv, instead of waiting for the next REFRESH).
+_refetch_state() {
+    "$TTS_CTL" get pause idle-active time-pos duration volume path mute \
+        > "$STATE_FILE.tmp" 2>/dev/null \
+        && mv -f "$STATE_FILE.tmp" "$STATE_FILE" 2>/dev/null
+}
+
+# Background fetcher: writes one full state snapshot per REFRESH seconds.
+(
+    while true; do
+        _refetch_state
+        sleep "$REFRESH"
+    done
+) &
+FETCH_PID=$!
+
+_cleanup() {
+    kill "$FETCH_PID" 2>/dev/null
+    rm -f "$STATE_FILE" "$STATE_FILE.tmp"
+    if [ -n "$_CTL_PATH" ] && [ -S "$_CTL_PATH" ]; then
+        ssh -O exit -o ControlPath="$_CTL_PATH" "$_PHONE_HOST" 2>/dev/null
+    fi
+    [ -n "$_CTL_DIR" ] && rm -rf "$_CTL_DIR"
+}
+trap _cleanup EXIT
+
+# Block briefly for the first snapshot so the very first frame isn't blank.
+for _ in 1 2 3 4 5 6 7 8; do
+    [ -s "$STATE_FILE" ] && break
+    sleep 0.1
+done
 
 while true; do
     draw
@@ -191,9 +241,10 @@ while true; do
         fi
     fi
 
-    # -t REFRESH: redraw on a timer so position/duration tick live while
-    # the popup is open. Empty key on timeout just falls through to redraw.
-    IFS= read -r -s -n1 -t "$REFRESH" key
+    # Short keypress timeout — keypresses respond within ~$TICK, completely
+    # decoupled from the background fetcher's IPC RTT. Empty key on timeout
+    # just falls through to redraw.
+    IFS= read -r -s -n1 -t "$TICK" key
     rc=$?
     # rc=0: key pressed; rc>128: timeout (redraw); rc=1 with empty: stdin closed.
     if [ $rc -gt 128 ]; then
@@ -201,26 +252,29 @@ while true; do
     elif [ $rc -ne 0 ]; then
         break
     fi
+    # All actions fire in the background so the keypress loop never blocks
+    # on an ssh RTT. The next periodic fetch (or the explicit refetch below)
+    # picks up the resulting state change.
     case "$key" in
-        ' ') "$TTS_CTL" toggle "$SESSION"; LOAD_PENDING_SINCE=$SECONDS ;;
-        r)   "$TTS_CTL" replay "$SESSION"; LOAD_PENDING_SINCE=$SECONDS ;;
-        0)   "$TTS_CTL" start  ;;
-        h)   "$TTS_CTL" seek -5  ;;
-        l)   "$TTS_CTL" seek 5   ;;
-        H)   "$TTS_CTL" seek -30 ;;
-        L)   "$TTS_CTL" seek 30  ;;
-        '-') "$TTS_CTL" volume -5 ;;
-        '=') "$TTS_CTL" volume 5  ;;
-        m)   "$TTS_CTL" mute   ;;
+        ' ') "$TTS_CTL" toggle "$SESSION" >/dev/null 2>&1 & disown
+             LOAD_PENDING_SINCE=$SECONDS ;;
+        r)   "$TTS_CTL" replay "$SESSION" >/dev/null 2>&1 & disown
+             LOAD_PENDING_SINCE=$SECONDS ;;
+        0)   "$TTS_CTL" start    >/dev/null 2>&1 & disown ;;
+        h)   "$TTS_CTL" seek -5  >/dev/null 2>&1 & disown ;;
+        l)   "$TTS_CTL" seek 5   >/dev/null 2>&1 & disown ;;
+        H)   "$TTS_CTL" seek -30 >/dev/null 2>&1 & disown ;;
+        L)   "$TTS_CTL" seek 30  >/dev/null 2>&1 & disown ;;
+        '-') "$TTS_CTL" volume -5 >/dev/null 2>&1 & disown ;;
+        '=') "$TTS_CTL" volume 5  >/dev/null 2>&1 & disown ;;
+        m)   "$TTS_CTL" mute     >/dev/null 2>&1 & disown ;;
         q|$'\e') exit 0 ;;
         *)   continue ;;
     esac
-    # mpv applies seek/loadfile asynchronously — without a brief settle
-    # the next draw may render the pre-change position. 50ms is below the
-    # noticeable threshold and well under one network RTT to the phone.
-    sleep 0.05
-    # Any user activity rearms the idle timer: if the keypress loaded a
-    # fresh clip from idle, we want the new playback to count, not the
-    # earlier idle window.
+    # Kick an out-of-band refetch ~$REFRESH seconds before the next periodic
+    # one would fire, so the visible state updates promptly after an action
+    # lands on mpv (~700ms RTT after backgrounded action started).
+    ( sleep 0.8; _refetch_state ) & disown
+    # Any user activity rearms the idle timer.
     IDLE_SINCE=
 done
