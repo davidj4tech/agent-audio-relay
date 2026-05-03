@@ -1,6 +1,6 @@
 #!/bin/bash
 # TTS playback control via mpv IPC.
-# Usage: tts-ctl pause|resume|toggle|replay [session]|seek SECS|volume DELTA|status|nowplaying
+# Usage: tts-ctl pause|resume|toggle|replay [session]|seek SECS|volume DELTA|status|nowplaying|get PROP...
 #
 # Talks to the mpv-tts daemon (Termux service `mpv-tts`) on the phone via
 # its JSON-IPC unix socket. When invoked on the phone the socket is hit
@@ -27,8 +27,8 @@ mpv_cmd() {
     if [ -S "$SOCK" ]; then
         printf '%s\n' "$json" | socat - "UNIX-CONNECT:$SOCK" 2>/dev/null
     else
-        # shellcheck disable=SC2029
-        ssh -o BatchMode=yes "$PHONE_HOST" \
+        # shellcheck disable=SC2029,SC2086
+        ssh -o BatchMode=yes ${CLAUDE_TTS_SSH_OPTS:-} "$PHONE_HOST" \
             "printf '%s\n' $(printf '%q' "$json") | socat - 'UNIX-CONNECT:$SOCK'" \
             2>/dev/null
     fi
@@ -40,31 +40,81 @@ mpv_get() {
         | jq -r 'select(.error=="success") | .data' 2>/dev/null
 }
 
+# Batched get: one IPC round-trip for N properties. Echoes one value per
+# input prop, in order, on its own line. Empty line for missing/error.
+mpv_batch_get() {
+    local props=("$@") cmds="" i=1 raw
+    for p in "${props[@]}"; do
+        cmds+="{\"command\":[\"get_property\",\"$p\"],\"request_id\":$i}"$'\n'
+        i=$((i+1))
+    done
+    if [ -S "$SOCK" ]; then
+        raw=$(printf '%s' "$cmds" | socat - "UNIX-CONNECT:$SOCK" 2>/dev/null)
+    else
+        # shellcheck disable=SC2029,SC2086
+        raw=$(ssh -o BatchMode=yes ${CLAUDE_TTS_SSH_OPTS:-} "$PHONE_HOST" \
+            "printf '%s' $(printf '%q' "$cmds") | socat - 'UNIX-CONNECT:$SOCK'" \
+            2>/dev/null)
+    fi
+    for ((i=1; i<=${#props[@]}; i++)); do
+        # Emit exactly one line per prop (empty if unavailable) so callers
+        # using mapfile keep stable indices.
+        local val
+        val=$(printf '%s\n' "$raw" \
+            | jq -r --argjson rid "$i" \
+                'select(.request_id==$rid and .error=="success") | .data' 2>/dev/null \
+            | head -n1)
+        printf '%s\n' "$val"
+    done
+}
+
+host_slug() {
+    hostname -s 2>/dev/null \
+        | tr 'A-Z' 'a-z' \
+        | tr -c 'a-z0-9-' '-' \
+        | sed 's/-\+/-/g; s/^-//; s/-$//'
+}
+
 replay_target() {
     local session="$1"
     if [ -z "$session" ] && [ -n "${TMUX_PANE:-}" ]; then
         session=$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)
     fi
-    local stem
+    # Build candidate stems in priority order. Host-prefixed first so two
+    # hosts with the same session name don't pick up each other's clip via
+    # the shared latest--<session> symlink on the phone.
+    local candidates=() sslug hslug
     if [ -n "$session" ]; then
-        stem="$ARCHIVE_DIR/latest--$(slug "$session")"
+        sslug=$(slug "$session")
+        hslug=$(host_slug)
+        [ -n "$hslug" ] && candidates+=("$ARCHIVE_DIR/latest--$hslug--$sslug")
+        candidates+=("$ARCHIVE_DIR/latest--$sslug")
     else
-        stem="$ARCHIVE_DIR/latest"
+        candidates+=("$ARCHIVE_DIR/latest")
     fi
     # Prefer a remote-existing match; mpv loadfile of a missing path is
     # a silent no-op, which is worse UX than picking *something* and
     # letting mpv error out visibly.
     if [ -S "$SOCK" ]; then
-        for ext in "${EXTS[@]}"; do
-            [ -e "$stem.$ext" ] && { printf '%s' "$stem.$ext"; return; }
+        local stem
+        for stem in "${candidates[@]}"; do
+            for ext in "${EXTS[@]}"; do
+                [ -e "$stem.$ext" ] && { printf '%s' "$stem.$ext"; return; }
+            done
         done
     else
+        # Single ssh call probes every (stem, ext) pair in priority order.
+        local probe_script="" stem
+        for stem in "${candidates[@]}"; do
+            probe_script+="for e in ${EXTS[*]}; do [ -e \"$stem.\$e\" ] && { echo \"$stem.\$e\"; exit 0; }; done; "
+        done
         local probe
-        probe=$(ssh -o BatchMode=yes "$PHONE_HOST" "for e in ${EXTS[*]}; do [ -e \"$stem.\$e\" ] && { echo \"$stem.\$e\"; exit 0; }; done" 2>/dev/null)
+        # shellcheck disable=SC2086
+        probe=$(ssh -o BatchMode=yes ${CLAUDE_TTS_SSH_OPTS:-} "$PHONE_HOST" "$probe_script" 2>/dev/null)
         [ -n "$probe" ] && { printf '%s' "$probe"; return; }
     fi
-    # Nothing matched — fall back to the first ext, mpv will surface the error.
-    printf '%s' "$stem.${EXTS[0]}"
+    # Nothing matched — fall back to the highest-priority stem, first ext.
+    printf '%s' "${candidates[0]}.${EXTS[0]}"
 }
 
 fmt_time() {
@@ -98,11 +148,13 @@ case "${1:-}" in
     seek)    mpv_cmd "{\"command\":[\"seek\",${2:-5},\"relative\"]}"   >/dev/null ;;
     volume)  mpv_cmd "{\"command\":[\"add\",\"volume\",${2:-5}]}"      >/dev/null ;;
     status)
-        paused=$(mpv_get pause)
-        idle=$(mpv_get idle-active)
-        pos=$(mpv_get time-pos)
-        dur=$(mpv_get duration)
-        vol=$(mpv_get volume)
+        # One IPC round-trip for all five properties.
+        mapfile -t _vals < <(mpv_batch_get pause idle-active time-pos duration volume)
+        paused="${_vals[0]:-}"
+        idle="${_vals[1]:-}"
+        pos="${_vals[2]:-}"
+        dur="${_vals[3]:-}"
+        vol="${_vals[4]:-}"
         if [ "$idle" = "true" ] || [ -z "$paused" ]; then
             state="○ idle"
         elif [ "$paused" = "true" ]; then
@@ -116,8 +168,14 @@ case "${1:-}" in
     nowplaying)
         mpv_get path
         ;;
+    get)
+        # Bulk getter — one IPC round-trip, one line per prop (empty if unavailable).
+        shift
+        [ $# -gt 0 ] || { echo "tts-ctl get: needs at least one property" >&2; exit 2; }
+        mpv_batch_get "$@"
+        ;;
     *)
-        echo "Usage: tts-ctl pause|resume|toggle|replay [session]|seek SECS|volume DELTA|status|nowplaying" >&2
+        echo "Usage: tts-ctl pause|resume|toggle|replay [session]|seek SECS|volume DELTA|status|nowplaying|get PROP..." >&2
         exit 1
         ;;
 esac

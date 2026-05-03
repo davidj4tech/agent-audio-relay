@@ -34,9 +34,22 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import socket
 import subprocess
 import time
 from pathlib import Path
+
+
+def _host_slug() -> str:
+    """Slug the local hostname the same way `tts-ctl` will on replay.
+
+    Two hosts emitting clips for tmux sessions with the same name (e.g. both
+    have `main`) would otherwise overwrite each other's `latest--<session>`
+    symlink on the phone. Adding a `latest--<host>--<session>` symlink and
+    preferring it on replay disambiguates them.
+    """
+    raw = socket.gethostname().split(".", 1)[0].lower()
+    return re.sub(r"-+", "-", re.sub(r"[^a-z0-9-]+", "-", raw)).strip("-")
 
 from .base import PlaybackBackend, original_name
 
@@ -182,6 +195,12 @@ class SshTermuxBackend(PlaybackBackend):
                 session, rest = after_ts.split("__", 1)
                 parts = rest.split("_")
                 if session:
+                    host = _host_slug()
+                    if host:
+                        # Host-prefixed pointer: tts-ctl's replay_target prefers
+                        # this so cross-host session-name collisions don't pick
+                        # up a clip from another machine.
+                        links.append(f".cache/agent-audio/latest--{host}--{session}.{ext}")
                     links.append(f".cache/agent-audio/latest--{session}.{ext}")
                     if len(parts) >= 3:
                         agent = parts[-2]

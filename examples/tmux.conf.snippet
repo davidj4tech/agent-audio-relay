@@ -9,6 +9,10 @@
 #   r      → replay latest from current tmux session
 
 bind T switch-client -T tts
-bind -T tts t     display-popup -E -w 95% -h 7 "~/.local/bin/tts-popup"
-bind -T tts Space run-shell "~/.local/bin/tts-ctl toggle ; tmux display-message \"TTS $(~/.local/bin/tts-ctl status)\""
-bind -T tts r     run-shell "~/.local/bin/tts-ctl replay ; tmux display-message \"TTS replay\""
+# Session is passed explicitly (not derived from $TMUX_PANE inside the popup,
+# which can resolve to the popup's own pane and miss the invoking session —
+# at which point tts-ctl silently falls back to the global `latest` symlink
+# and you hear a clip from some unrelated host/session).
+bind -T tts t     display-popup -E -w 95% -h 7 "TTS_POPUP_SESSION='#{session_name}' ~/.local/bin/tts-popup"
+bind -T tts Space run-shell "~/.local/bin/tts-ctl toggle '#{session_name}' ; tmux display-message \"TTS $(~/.local/bin/tts-ctl status)\""
+bind -T tts r     run-shell "~/.local/bin/tts-ctl replay '#{session_name}' ; tmux display-message \"TTS replay\""

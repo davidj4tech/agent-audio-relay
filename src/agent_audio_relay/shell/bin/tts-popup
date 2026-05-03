@@ -12,9 +12,110 @@
 set -u
 TTS_CTL="${TTS_CTL:-tts-ctl}"
 
+# Pin the popup to a specific tmux session so toggle/replay always target
+# this session's clip — never the global `latest` symlink, which on a shared
+# phone archive may point at some other host's session. The tmux binding
+# passes the session in via TTS_POPUP_SESSION; if missing we try to recover
+# from the inherited TMUX env, but the binding is the reliable path.
+SESSION="${TTS_POPUP_SESSION:-}"
+if [ -z "$SESSION" ] && [ -n "${TMUX:-}" ]; then
+    SESSION=$(tmux display-message -p '#S' 2>/dev/null || true)
+fi
+
+# When the mpv-tts socket isn't local, every tts-ctl keypress otherwise
+# pays a fresh ssh handshake. If the user's ssh config already provides
+# a working ControlMaster for the phone host, reuse it (do nothing).
+# Otherwise open one for the popup's lifetime.
+_SOCK="${MPV_TTS_SOCK:-/data/data/com.termux/files/usr/tmp/mpv-tts.sock}"
+if [ ! -S "$_SOCK" ]; then
+    _PHONE_HOST="${CLAUDE_TTS_PHONE_HOST:-p8ar}"
+    if ! ssh -o BatchMode=yes -O check "$_PHONE_HOST" 2>/dev/null; then
+        _CTL_DIR="$(mktemp -d -t tts-popup.XXXXXX)"
+        _CTL_PATH="$_CTL_DIR/ssh.sock"
+        if ssh -M -N -f \
+                -o ControlPath="$_CTL_PATH" \
+                -o ControlPersist=60 \
+                -o BatchMode=yes \
+                "$_PHONE_HOST" 2>/dev/null \
+            && [ -S "$_CTL_PATH" ]; then
+            export CLAUDE_TTS_SSH_OPTS="-o ControlPath=$_CTL_PATH"
+            trap 'ssh -O exit -o ControlPath="$_CTL_PATH" "$_PHONE_HOST" 2>/dev/null; rm -rf "$_CTL_DIR"' EXIT
+        else
+            rm -rf "$_CTL_DIR"
+        fi
+    fi
+fi
+
+fmt_time() {
+    local t="$1"
+    if [ -z "$t" ] || [ "$t" = "null" ]; then
+        printf -- '--:--'
+        return
+    fi
+    awk -v t="$t" 'BEGIN{ s=int(t); printf "%02d:%02d", s/60, s%60 }'
+}
+
+# Path → display label.
+#   latest.<ext>                       → "global"
+#   latest--<host>--<session>.<ext>    → "<session>"   (host-namespaced)
+#   latest--<session>.<ext>            → "<session>"   (legacy / cross-host)
+#   anything else                      → basename without extension
+nowplaying_label() {
+    local path="$1" base
+    [ -z "$path" ] || [ "$path" = "null" ] && { printf '(idle)'; return; }
+    base="${path##*/}"
+    base="${base%.*}"
+    case "$base" in
+        latest)         printf 'global' ;;
+        latest--*--*)   printf '%s' "${base##*--}" ;;
+        latest--*)      printf '%s' "${base#latest--}" ;;
+        *)              printf '%s' "$base" ;;
+    esac
+}
+
+bar() {
+    local pos="$1" dur="$2" width="$3" filled empty i
+    if [ -z "$pos" ] || [ -z "$dur" ] || [ "$pos" = "null" ] || [ "$dur" = "null" ]; then
+        for ((i=0; i<width; i++)); do printf '─'; done
+        return
+    fi
+    filled=$(awk -v p="$pos" -v d="$dur" -v w="$width" \
+        'BEGIN{ if(d<=0){print 0; exit} f=int((p/d)*w); if(f<0)f=0; if(f>w)f=w; print f }')
+    empty=$((width - filled))
+    for ((i=0; i<filled; i++)); do printf '█'; done
+    for ((i=0; i<empty;  i++)); do printf '░'; done
+}
+
 draw() {
     clear
-    printf 'TTS  %s\n' "$("$TTS_CTL" status 2>/dev/null)"
+    local v paused idle pos dur vol path state cols barw
+    mapfile -t v < <("$TTS_CTL" get pause idle-active time-pos duration volume path 2>/dev/null)
+    paused="${v[0]:-}"; idle="${v[1]:-}"; pos="${v[2]:-}"
+    dur="${v[3]:-}";    vol="${v[4]:-}";  path="${v[5]:-}"
+    if [ "$idle" = "true" ] || [ -z "$paused" ]; then
+        state='○ idle    '
+    elif [ "$paused" = "true" ]; then
+        state='⏸  PAUSED '
+    else
+        state='▶  PLAYING'
+    fi
+    cols="${COLUMNS:-80}"
+    barw=$(( cols - 30 ))
+    [ "$barw" -lt 10 ] && barw=10
+    [ "$barw" -gt 60 ] && barw=60
+
+    local label
+    if [ -z "$path" ] || [ "$path" = "null" ]; then
+        # mpv is idle — surface the session this popup is pinned to so
+        # the user knows what Space-after-idle will load.
+        [ -n "$SESSION" ] && label="(idle: $SESSION)" || label="(idle)"
+    else
+        label=$(nowplaying_label "$path")
+    fi
+    printf 'TTS  %s\n' "$label"
+    printf '%s  %s ' "$state" "$(fmt_time "$pos")"
+    bar "$pos" "$dur" "$barw"
+    printf ' %s  vol=%s\n' "$(fmt_time "$dur")" "${vol%.*}"
     printf '\n'
     printf '[Spc]togl  [p]ause  [R]esume\n'
     printf '[r]eplay   [h/l]±5s [H/L]±30s\n'
@@ -36,10 +137,10 @@ while true; do
         break
     fi
     case "$key" in
-        ' ') "$TTS_CTL" toggle ;;
+        ' ') "$TTS_CTL" toggle "$SESSION" ;;
         p)   "$TTS_CTL" pause  ;;
         R)   "$TTS_CTL" resume ;;
-        r)   "$TTS_CTL" replay ;;
+        r)   "$TTS_CTL" replay "$SESSION" ;;
         h)   "$TTS_CTL" seek -5  ;;
         l)   "$TTS_CTL" seek 5   ;;
         H)   "$TTS_CTL" seek -30 ;;
