@@ -86,12 +86,14 @@ for _ in 1 2 3 4 5; do
     sleep 0.1
 done
 
-# Extract all text blocks from the last assistant message that has text.
+# Pick the very-latest assistant message and read text from it. If the
+# latest turn is tool-call-only (no text content), exit silently — falling
+# back to a prior message's text would re-speak something already played
+# (whose 5-min dedup claim has since been GC'd), surfacing as a "repeat"
+# even though no clip was technically duplicated.
 text=$(tac "$transcript_path" \
     | jq -s '
-        [.[] | select(.message.role == "assistant")
-             | select([.message.content[]? | select(.type == "text")] | length > 0)
-        ][0]
+        [.[] | select(.message.role == "assistant")][0]
         | [.message.content[]? | select(.type == "text") | .text]
         | join("\n")
     ' -r 2>/dev/null)
