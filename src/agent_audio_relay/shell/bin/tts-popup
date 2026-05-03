@@ -133,7 +133,20 @@ draw() {
     paused="${STATE[0]:-}"; idle="${STATE[1]:-}"; pos="${STATE[2]:-}"
     dur="${STATE[3]:-}";    vol="${STATE[4]:-}";  path="${STATE[5]:-}"
     mute="${STATE[6]:-}"
+    local fetch_ts="${STATE[7]:-}"
     IDLE="$idle"
+    # Interpolate time-pos between fetches so the progress bar moves
+    # smoothly. Only when actively playing — paused/idle/eof should hold.
+    if [ -n "$pos" ] && [ "$pos" != "null" ] \
+        && [ -n "$fetch_ts" ] \
+        && [ "$paused" = "false" ] && [ "$idle" = "false" ]; then
+        pos=$(awk -v p="$pos" -v t="$fetch_ts" -v now="$(date +%s.%N)" -v d="${dur:-0}" \
+            'BEGIN{
+                p = p + (now - t);
+                if (d > 0 && p > d) p = d;
+                printf "%.3f", p;
+            }')
+    fi
     if [ "$idle" = "true" ] || [ -z "$paused" ]; then
         state='○ idle    '
     elif [ "$paused" = "true" ]; then
@@ -183,8 +196,8 @@ draw() {
     printf '\033[J'
 }
 
-REFRESH="${TTS_POPUP_REFRESH:-1}"     # how often the background fetcher polls mpv
-TICK="${TTS_POPUP_TICK:-0.15}"         # main-loop keypress timeout (UI responsiveness floor)
+REFRESH="${TTS_POPUP_REFRESH:-0.5}"   # how often the background fetcher polls mpv
+TICK="${TTS_POPUP_TICK:-0.15}"        # main-loop keypress timeout (UI responsiveness floor)
 AUTO_CLOSE_IDLE="${TTS_POPUP_AUTO_CLOSE:-10}"
 
 # Auto-close state: only fire after we've actually seen mpv playing, so
@@ -207,9 +220,14 @@ declare -a STATE
 # Refetch state out-of-band. Used both by the periodic fetcher and as a
 # kick after every keypress (so the display updates promptly once the
 # action's effect lands on mpv, instead of waiting for the next REFRESH).
+# Appends a fetch-time epoch so draw() can interpolate time-pos between
+# fetches and the progress bar moves smoothly instead of jumping once
+# per REFRESH.
 _refetch_state() {
-    "$TTS_CTL" get pause idle-active time-pos duration volume path mute \
-        > "$STATE_FILE.tmp" 2>/dev/null \
+    {
+        "$TTS_CTL" get pause idle-active time-pos duration volume path mute \
+            && date +%s.%N
+    } > "$STATE_FILE.tmp" 2>/dev/null \
         && mv -f "$STATE_FILE.tmp" "$STATE_FILE" 2>/dev/null
 }
 
