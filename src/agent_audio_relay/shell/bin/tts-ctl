@@ -130,9 +130,13 @@ case "${1:-}" in
     pause)   mpv_cmd '{"command":["set_property","pause",true]}'  >/dev/null ;;
     resume)  mpv_cmd '{"command":["set_property","pause",false]}' >/dev/null ;;
     toggle)
-        # If mpv is idle (no file loaded or playback finished), start the
-        # latest clip; otherwise just flip pause.
-        if [ "$(mpv_get idle-active)" = "true" ]; then
+        # If mpv has nothing useful to resume — either truly idle, or sitting
+        # at EOF with the previous clip still loaded — load the latest clip
+        # for this session. Otherwise just flip pause. (mpv with the default
+        # keep-open behavior leaves the file loaded after playback ends, so
+        # idle-active alone misses the "clip just finished" case.)
+        mapfile -t _state < <(mpv_batch_get idle-active eof-reached)
+        if [ "${_state[0]:-}" = "true" ] || [ "${_state[1]:-}" = "true" ]; then
             target=$(replay_target "${2:-}")
             mpv_cmd "{\"command\":[\"loadfile\",\"$target\",\"replace\"]}" >/dev/null
             mpv_cmd '{"command":["set_property","pause",false]}'           >/dev/null
