@@ -163,20 +163,43 @@ case "${1:-}" in
     resume)  mpv_cmd '{"command":["set_property","pause",false]}' >/dev/null ;;
     toggle)
         # Reload-or-pause. The user-mental-model for Space in a session-pinned
-        # popup is "play my session's clip". So we reload whenever:
+        # popup is "play my session's clip". Reload whenever:
         #   - mpv is idle (nothing loaded), OR
         #   - mpv is at EOF (clip finished; default keep-open leaves file
         #     loaded but eof-reached=true), OR
-        #   - the currently-loaded path differs from this session's target
-        #     (e.g. some other session's clip was the last thing played).
+        #   - the currently-loaded path doesn't belong to this session.
         # Only flip pause when the right clip is already loaded mid-playback.
-        target=$(replay_target "${2:-}")
+        #
+        # Latency note: replay_target costs one ssh round-trip to the phone.
+        # Skip it when mpv's reported path basename is unambiguously a
+        # `latest--…--<session>` symlink for this session — same answer
+        # without the probe.
         mapfile -t _state < <(mpv_batch_get idle-active eof-reached path)
-        if [ "${_state[0]:-}" = "true" ] \
-            || [ "${_state[1]:-}" = "true" ] \
-            || [ "${_state[2]:-}" != "$target" ]; then
-            mpv_cmd "{\"command\":[\"loadfile\",\"$target\",\"replace\"]}" >/dev/null
-            mpv_cmd '{"command":["set_property","pause",false]}'           >/dev/null
+        _idle="${_state[0]:-}"
+        _eof="${_state[1]:-}"
+        _cur="${_state[2]:-}"
+        _sess="${2:-}"
+        _need_reload=0
+        if [ "$_idle" = "true" ] || [ "$_eof" = "true" ] || [ -z "$_cur" ]; then
+            _need_reload=1
+        elif [ -n "$_sess" ]; then
+            _sslug=$(slug "$_sess")
+            _curbase="${_cur##*/}"
+            case "$_curbase" in
+                latest--"$_sslug".*|latest--*--"$_sslug".*|latest--"$_sslug"__*) ;;
+                *)
+                    # Path doesn't look like a symlink for this session — resolve
+                    # target and compare strictly. (Covers archive-file paths
+                    # written before the loadfile-via-symlink change.)
+                    _target=$(replay_target "$_sess")
+                    [ "$_cur" != "$_target" ] && _need_reload=1
+                    ;;
+            esac
+        fi
+        if [ "$_need_reload" = "1" ]; then
+            : "${_target:=$(replay_target "$_sess")}"
+            mpv_cmd "{\"command\":[\"loadfile\",\"$_target\",\"replace\"]}" >/dev/null
+            mpv_cmd '{"command":["set_property","pause",false]}'            >/dev/null
         else
             mpv_cmd '{"command":["cycle","pause"]}' >/dev/null
         fi
