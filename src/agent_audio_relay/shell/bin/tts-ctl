@@ -275,12 +275,25 @@ case "${1:-}" in
     prev|next)
         # Walk the session's archive by mtime. Find the currently-loaded
         # clip's position, jump to the older (prev) or newer (next) one.
+        # Two nuances mirroring mpv/Spotify-style behavior:
+        #   prev when >5s into the current clip → restart current
+        #   next when there's no newer clip       → seek to end (dismiss)
         direction="$1"
         sess="${2:-}"
         if [ -z "$sess" ] && [ -n "${TMUX_PANE:-}" ]; then
             sess=$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)
         fi
         [ -z "$sess" ] && exit 1
+        # Smart prev: restart-current if we're > 5s in. awk handles the
+        # float compare since bash arithmetic is integer-only.
+        if [ "$direction" = "prev" ]; then
+            cur_pos=$(mpv_get time-pos)
+            if [ -n "$cur_pos" ] && [ "$cur_pos" != "null" ] \
+                && awk -v p="$cur_pos" 'BEGIN{exit !(p > 5)}'; then
+                mpv_cmd '{"command":["seek",0,"absolute"]}' >/dev/null
+                exit 0
+            fi
+        fi
         sslug=$(slug "$sess")
         cur=$(mpv_get path)
         cur_base="${cur##*/}"
@@ -318,6 +331,13 @@ case "${1:-}" in
             mpv_cmd "{\"command\":[\"loadfile\",\"$target\",\"replace\"]}" >/dev/null
             mpv_cmd '{"command":["set_property","pause",false]}'           >/dev/null
             mpv_cmd '{"command":["seek",0,"absolute"]}'                    >/dev/null
+        elif [ "$direction" = "next" ]; then
+            # No newer clip. "End" the current one by seeking to its
+            # duration — mpv hits EOF and goes idle, dismissing it.
+            dur=$(mpv_get duration)
+            if [ -n "$dur" ] && [ "$dur" != "null" ]; then
+                mpv_cmd "{\"command\":[\"seek\",${dur%.*},\"absolute\"]}" >/dev/null
+            fi
         fi
         ;;
     status)
