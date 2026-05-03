@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+# tts-emit — agent-agnostic TTS generator.
+#
+# Reads text on stdin, generates audio via the configured engine, drops
+# the file atomically into a watch dir, and (optionally) deduplicates
+# concurrent invocations via an atomic mkdir claim.
+#
+# Replaces the per-hook duplication of engine selection, edge/openai
+# fallback, markdown stripping, atomic-mv, and dedup. Each hook is now
+# responsible only for "find the text to speak"; emission is shared.
+#
+# Usage:
+#   echo "$text" | tts-emit --tag claude --drop-dir /tmp/tts-claude \
+#       [--kind stop|notif] [--session ID] \
+#       [--engine edge|openai] [--voice NAME] [--edge-voice NAME] \
+#       [--openai-model MODEL] [--openai-python BIN] [--edge-bin BIN] \
+#       [--dedup-key KEY] [--dedup-ttl SECS] [--stamp-dir DIR] \
+#       [--no-strip-markdown] [--log-file PATH]
+#
+# Exit codes:
+#   0  audio written, OR dedup-claim lost (silent skip)
+#   1  generation failed (logged)
+#   2  bad usage
+
+set -u
+
+ENGINE="${RELAY_TTS_ENGINE:-edge}"
+VOICE=""
+EDGE_VOICE="${RELAY_EDGE_VOICE:-en-US-AriaNeural}"
+EDGE_BIN="${RELAY_EDGE_TTS_BIN:-edge-tts}"
+OPENAI_MODEL="${RELAY_OPENAI_MODEL:-gpt-4o-mini-tts}"
+OPENAI_PYTHON="${RELAY_OPENAI_PYTHON:-python3}"
+DROP_DIR=""
+TAG=""
+KIND="stop"
+SESSION=""
+DEDUP_KEY=""
+DEDUP_TTL="${RELAY_DEDUP_TTL:-300}"
+STAMP_DIR="${RELAY_STAMP_DIR:-${TMPDIR:-/tmp}}"
+STRIP_MD=1
+LOG_FILE="${RELAY_LOG_FILE:-}"
+
+usage() {
+    sed -n '2,/^$/p' "$0" | sed 's/^# \?//' >&2
+    exit 2
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --engine)         ENGINE="$2"; shift 2 ;;
+        --voice)          VOICE="$2"; shift 2 ;;
+        --edge-voice)     EDGE_VOICE="$2"; shift 2 ;;
+        --edge-bin)       EDGE_BIN="$2"; shift 2 ;;
+        --openai-model)   OPENAI_MODEL="$2"; shift 2 ;;
+        --openai-python)  OPENAI_PYTHON="$2"; shift 2 ;;
+        --drop-dir)       DROP_DIR="$2"; shift 2 ;;
+        --tag)            TAG="$2"; shift 2 ;;
+        --kind)           KIND="$2"; shift 2 ;;
+        --session)        SESSION="$2"; shift 2 ;;
+        --dedup-key)      DEDUP_KEY="$2"; shift 2 ;;
+        --dedup-ttl)      DEDUP_TTL="$2"; shift 2 ;;
+        --stamp-dir)      STAMP_DIR="$2"; shift 2 ;;
+        --no-strip-markdown) STRIP_MD=0; shift ;;
+        --log-file)       LOG_FILE="$2"; shift 2 ;;
+        -h|--help)        usage ;;
+        *) echo "tts-emit: unknown arg: $1" >&2; exit 2 ;;
+    esac
+done
+
+[ -n "$DROP_DIR" ] || { echo "tts-emit: --drop-dir is required" >&2; exit 2; }
+[ -n "$TAG" ]      || { echo "tts-emit: --tag is required" >&2; exit 2; }
+
+# Default voices per engine (if --voice not given)
+if [ -z "$VOICE" ]; then
+    case "$ENGINE" in
+        edge)   VOICE="$EDGE_VOICE" ;;
+        openai) VOICE="${RELAY_OPENAI_VOICE:-marin}" ;;
+    esac
+fi
+
+mkdir -p "$DROP_DIR" "$STAMP_DIR"
+[ -n "$LOG_FILE" ] && mkdir -p "$(dirname "$LOG_FILE")"
+
+log() {
+    local line
+    line=$(printf '[%s] tts-emit(%s): %s' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TAG" "$*")
+    if [ -n "$LOG_FILE" ]; then
+        printf '%s\n' "$line" >> "$LOG_FILE"
+    else
+        printf '%s\n' "$line" >&2
+    fi
+}
+
+# shellcheck source=../hooks/lib/denote-stem.sh
+. "$(dirname "$0")/../hooks/lib/denote-stem.sh"
+
+text=$(cat)
+if [ -z "$text" ]; then
+    log "empty input; nothing to speak"
+    exit 0
+fi
+
+if [ "$STRIP_MD" = 1 ]; then
+    text=$(printf '%s\n' "$text" \
+        | sed 's/```[a-zA-Z0-9_-]*//g; s/```//g' \
+        | sed 's/^#\{1,6\} //g' \
+        | sed 's/\*\*\([^*]*\)\*\*/\1/g' \
+        | sed 's/\*\([^*]*\)\*/\1/g' \
+        | sed 's/`\([^`]*\)`/\1/g' \
+        | sed 's/^[[:space:]]*[-*] //g' \
+        | sed '/^[[:space:]]*$/d')
+fi
+
+if [ -z "$text" ]; then
+    log "empty after markdown strip; nothing to speak"
+    exit 0
+fi
+
+# Atomic dedup: mkdir is atomic on POSIX, so concurrent callers with the
+# same dedup-key serialise — exactly one wins. GC stale claims so the same
+# key can be re-spoken later.
+if [ -n "$DEDUP_KEY" ]; then
+    claims_dir="$STAMP_DIR/tts-emit-claims"
+    mkdir -p "$claims_dir"
+    find "$claims_dir" -mindepth 1 -maxdepth 1 -type d \
+        -mmin "+$(( (DEDUP_TTL + 59) / 60 ))" -exec rmdir {} + 2>/dev/null || true
+    key_hash=$(printf '%s' "$DEDUP_KEY" | sha1sum | cut -d' ' -f1)
+    if ! mkdir "$claims_dir/$key_hash" 2>/dev/null; then
+        log "dedup-claim lost for key=$key_hash; skipping"
+        exit 0
+    fi
+fi
+
+generate_edge() {
+    local outfile="$1" voice="$2"
+    "$EDGE_BIN" --text "$text" --voice "$voice" --write-media "$outfile" 2>/dev/null
+}
+
+generate_openai() {
+    local outfile="$1" err_file rc
+    err_file=$(mktemp)
+    TTS_TEXT="$text" TTS_OUTFILE="$outfile" TTS_MODEL="$OPENAI_MODEL" TTS_VOICE="$VOICE" \
+        "$OPENAI_PYTHON" - 2>"$err_file" <<'PY'
+import os, sys
+try:
+    from openai import OpenAI
+    client = OpenAI()
+    with client.audio.speech.with_streaming_response.create(
+        model=os.environ["TTS_MODEL"],
+        voice=os.environ["TTS_VOICE"],
+        input=os.environ["TTS_TEXT"],
+    ) as resp:
+        resp.stream_to_file(os.environ["TTS_OUTFILE"])
+except Exception as e:
+    msg = str(e)
+    code = getattr(getattr(e, "response", None), "status_code", None) \
+        or getattr(e, "status_code", None)
+    name = type(e).__name__
+    sys.stderr.write(f"{name}{f' ({code})' if code else ''}: {msg}\n")
+    sys.exit(1)
+PY
+    rc=$?
+    if [ $rc -ne 0 ] || [ ! -s "$outfile" ]; then
+        local reason
+        reason=$(tr '\n' ' ' < "$err_file" | sed 's/  */ /g; s/^ //; s/ $//')
+        [ -z "$reason" ] && reason="unknown error"
+        log "openai TTS failed: $reason"
+        rm -f "$err_file"
+        return 1
+    fi
+    rm -f "$err_file"
+    return 0
+}
+
+# Stage outside the watched dir, then atomically rename. Avoids
+# the watcher seeing intermediate close_writes (e.g. openai streaming
+# chunks, fallback overwriting failed openai output).
+final="${DROP_DIR}/$(make_stem "$TAG" "$KIND" "$SESSION").mp3"
+staging=$(mktemp --suffix=.mp3)
+trap 'rm -f "$staging"' EXIT
+
+case "$ENGINE" in
+    edge)
+        generate_edge "$staging" "$VOICE" || true
+        ;;
+    openai)
+        if ! generate_openai "$staging"; then
+            # Fallback to edge.
+            generate_edge "$staging" "$EDGE_VOICE" || true
+        fi
+        ;;
+    *)
+        log "unknown engine: $ENGINE"
+        exit 1
+        ;;
+esac
+
+if [ ! -s "$staging" ]; then
+    log "generation produced no audio; nothing dropped"
+    exit 1
+fi
+
+mv "$staging" "$final"
+log "wrote $final"
+printf '%s\n' "$final"

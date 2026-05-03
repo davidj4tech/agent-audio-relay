@@ -35,24 +35,19 @@ set -euo pipefail
 
 [ "${OPENCODE_TTS_ENABLED:-1}" = "0" ] && exit 0
 
-EDGE_TTS="${RELAY_EDGE_TTS_BIN:-edge-tts}"
 OPENCODE_BIN="${RELAY_OPENCODE_BIN:-opencode}"
-ENGINE="${OPENCODE_TTS_ENGINE:-edge}"
-EDGE_VOICE="${OPENCODE_TTS_EDGE_VOICE:-en-US-AriaNeural}"
-case "$ENGINE" in
-    edge)
-        VOICE="${OPENCODE_TTS_VOICE:-$EDGE_VOICE}"
-        ;;
-    openai)
-        OPENAI_PYTHON="${OPENCODE_TTS_OPENAI_PYTHON:-python3}"
-        OPENAI_MODEL="${OPENCODE_TTS_OPENAI_MODEL:-gpt-4o-mini-tts}"
-        VOICE="${OPENCODE_TTS_VOICE:-marin}"
-        ;;
-    *)
-        echo "opencode-tts-hook: unknown OPENCODE_TTS_ENGINE='$ENGINE'" >&2
-        exit 1
-        ;;
-esac
+TTS_EMIT="${RELAY_TTS_EMIT_BIN:-$(dirname "$0")/../bin/tts-emit}"
+[ -x "$TTS_EMIT" ] || TTS_EMIT="tts-emit"
+
+emit_args=(
+    --tag opencode
+    --engine "${OPENCODE_TTS_ENGINE:-edge}"
+    --edge-voice "${OPENCODE_TTS_EDGE_VOICE:-en-US-AriaNeural}"
+)
+[ -n "${OPENCODE_TTS_VOICE:-}" ]         && emit_args+=(--voice "$OPENCODE_TTS_VOICE")
+[ -n "${OPENCODE_TTS_OPENAI_MODEL:-}" ]  && emit_args+=(--openai-model "$OPENCODE_TTS_OPENAI_MODEL")
+[ -n "${OPENCODE_TTS_OPENAI_PYTHON:-}" ] && emit_args+=(--openai-python "$OPENCODE_TTS_OPENAI_PYTHON")
+
 DROP_DIR="${OPENCODE_TTS_DROP_DIR:-/tmp/tts-opencode}"
 STATE_FILE="${OPENCODE_TTS_STATE_FILE:-/tmp/opencode-tts-state.tsv}"
 MTIME_FILE="${OPENCODE_TTS_MTIME_FILE:-/tmp/opencode-tts-mtime.tsv}"
@@ -83,17 +78,6 @@ cleanup_opencode_tmp_so() {
   # opencode export currently leaks temp native .so files in /tmp.
   # Keep /tmp from filling; the export process has exited by the time this runs.
   find /tmp -maxdepth 1 -type f -user "$(id -un)" -name '.*-00000000.so' -size +1M -delete 2>/dev/null || true
-}
-
-strip_markdown() {
-  printf '%s\n' "$1" \
-    | sed 's/```[a-zA-Z0-9_-]*//g; s/```//g' \
-    | sed 's/^#{1,6} //g' \
-    | sed 's/\*\*\([^*]*\)\*\*/\1/g' \
-    | sed 's/\*\([^*]*\)\*/\1/g' \
-    | sed 's/`\([^`]*\)`/\1/g' \
-    | sed 's/^\s*[-*] //g' \
-    | sed '/^[[:space:]]*$/d'
 }
 
 latest_final_answer() {
@@ -184,67 +168,17 @@ seed_state() {
   shopt -u nullglob
 }
 
-tts_generate() {
-  local text="$1" outfile="$2"
-  case "$ENGINE" in
-    edge)
-      "$EDGE_TTS" --text "$text" --voice "$VOICE" --write-media "$outfile" >/dev/null 2>&1
-      ;;
-    openai)
-      local err_file rc
-      err_file=$(mktemp)
-      TTS_TEXT="$text" TTS_OUTFILE="$outfile" TTS_MODEL="$OPENAI_MODEL" TTS_VOICE="$VOICE" \
-        "$OPENAI_PYTHON" - 2>"$err_file" <<'PY'
-import os, sys
-try:
-    from openai import OpenAI
-    client = OpenAI()
-    with client.audio.speech.with_streaming_response.create(
-        model=os.environ["TTS_MODEL"],
-        voice=os.environ["TTS_VOICE"],
-        input=os.environ["TTS_TEXT"],
-    ) as resp:
-        resp.stream_to_file(os.environ["TTS_OUTFILE"])
-except Exception as e:
-    msg = str(e)
-    code = getattr(getattr(e, "response", None), "status_code", None) \
-        or getattr(e, "status_code", None)
-    name = type(e).__name__
-    sys.stderr.write(f"{name}{f' ({code})' if code else ''}: {msg}\n")
-    sys.exit(1)
-PY
-      rc=$?
-      if [ $rc -ne 0 ] || [ ! -s "$outfile" ]; then
-        log "openai TTS failed: $(tr '\n' ' ' < "$err_file" | sed 's/  */ /g')"
-        rm -f "$err_file"
-        "$EDGE_TTS" --text "$text" --voice "$EDGE_VOICE" --write-media "$outfile" >/dev/null 2>&1
-        return $?
-      fi
-      rm -f "$err_file"
-      ;;
-  esac
-}
-
 enqueue_tts() {
   local text="$1"
   local session_id="${2:-}"
-  local clean final staging
-
-  clean=$(strip_markdown "$text")
-  if [ -z "$clean" ]; then
-    log "Skipped empty text after markdown stripping"
-    return 0
-  fi
-
-  final="${DROP_DIR}/$(make_stem opencode stop "$session_id").mp3"
-  staging=$(mktemp --suffix=.mp3)
-  if tts_generate "$clean" "$staging" && [ -s "$staging" ]; then
-    mv "$staging" "$final"
-    log "Queued TTS: $final"
+  local args=("${emit_args[@]}" --drop-dir "$DROP_DIR" --kind stop)
+  [ -n "$session_id" ] && args+=(--session "$session_id")
+  [ -n "${RELAY_LOG_FILE:-$LOG_FILE}" ] && args+=(--log-file "${RELAY_LOG_FILE:-$LOG_FILE}")
+  if printf '%s' "$text" | "$TTS_EMIT" "${args[@]}" >/dev/null; then
+    log "Queued TTS for session=$session_id"
   else
-    log "TTS failed; no audio queued"
+    log "TTS failed for session=$session_id"
   fi
-  rm -f "$staging"
 }
 
 if [ ! -s "$STATE_FILE" ]; then
