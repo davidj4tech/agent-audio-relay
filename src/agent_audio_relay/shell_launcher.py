@@ -1,7 +1,7 @@
 """Thin launchers that exec the packaged shell scripts.
 
 Each function is wired up as a `[project.scripts]` entry in pyproject.toml,
-so `pip install` puts e.g. `tts-emit` and `claude-code-tts-hook` into
+so `pip install` puts e.g. `tts-drop` and `claude-code-tts-hook` into
 `~/.local/bin/` (or the pipx venv) as console scripts. The launcher resolves
 the bash script's path inside the installed package and `os.execv`s into it,
 preserving argv, stdin, stdout, stderr, and the script's own `$0` so its
@@ -28,7 +28,7 @@ def _exec(rel: str) -> None:
     os.execv("/bin/bash", ["/bin/bash", str(script), *sys.argv[1:]])
 
 
-def tts_emit() -> None:           _exec("bin/tts-emit")
+def tts_drop() -> None:           _exec("bin/tts-drop")
 def tts_ctl() -> None:            _exec("bin/tts-ctl")
 def tts_popup() -> None:          _exec("bin/tts-popup")
 def forwarder() -> None:          _exec("bin/agent-audio-relay-forwarder.sh")

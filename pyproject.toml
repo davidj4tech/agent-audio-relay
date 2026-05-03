@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-audio-relay"
-version = "0.3.2"
+version = "0.3.3"
 description = "Bidirectional voice interface for coding agents — TTS from agent responses to pluggable playback targets, with hooks for Claude Code, Codex, OpenCode, and Home Assistant"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -31,7 +31,7 @@ Issues = "https://github.com/davidj4tech/agent-audio-relay/issues"
 agent-audio-relay              = "agent_audio_relay.watcher:main"
 agent-audio-relay-forwarder    = "agent_audio_relay.shell_launcher:forwarder"
 agent-audio-relay-hooks-dir    = "agent_audio_relay.shell_launcher:hooks_dir"
-tts-emit                       = "agent_audio_relay.shell_launcher:tts_emit"
+tts-drop                       = "agent_audio_relay.shell_launcher:tts_drop"
 tts-ctl                        = "agent_audio_relay.shell_launcher:tts_ctl"
 tts-popup                      = "agent_audio_relay.shell_launcher:tts_popup"
 claude-code-tts-hook           = "agent_audio_relay.shell_launcher:claude_code_hook"

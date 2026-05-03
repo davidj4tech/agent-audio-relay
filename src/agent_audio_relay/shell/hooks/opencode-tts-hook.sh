@@ -36,8 +36,8 @@ set -euo pipefail
 [ "${OPENCODE_TTS_ENABLED:-1}" = "0" ] && exit 0
 
 OPENCODE_BIN="${RELAY_OPENCODE_BIN:-opencode}"
-TTS_EMIT="${RELAY_TTS_EMIT_BIN:-$(dirname "$0")/../bin/tts-emit}"
-[ -x "$TTS_EMIT" ] || TTS_EMIT="tts-emit"
+TTS_DROP="${RELAY_TTS_DROP_BIN:-$(dirname "$0")/../bin/tts-drop}"
+[ -x "$TTS_DROP" ] || TTS_DROP="tts-drop"
 
 emit_args=(
     --tag opencode
@@ -174,7 +174,7 @@ enqueue_tts() {
   local args=("${emit_args[@]}" --drop-dir "$DROP_DIR" --kind stop)
   [ -n "$session_id" ] && args+=(--session "$session_id")
   [ -n "${RELAY_LOG_FILE:-$LOG_FILE}" ] && args+=(--log-file "${RELAY_LOG_FILE:-$LOG_FILE}")
-  if printf '%s' "$text" | "$TTS_EMIT" "${args[@]}" >/dev/null; then
+  if printf '%s' "$text" | "$TTS_DROP" "${args[@]}" >/dev/null; then
     log "Queued TTS for session=$session_id"
   else
     log "TTS failed for session=$session_id"

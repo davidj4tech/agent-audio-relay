@@ -27,7 +27,7 @@ make_stem() {
     local ts
     ts=$(date -u +%Y%m%dT%H%M%S)
 
-    # Initialize locals to "" — tts-emit runs `set -u`, which would error on
+    # Initialize locals to "" — tts-drop runs `set -u`, which would error on
     # `[ -z "$session" ]` if neither branch above assigned the variable.
     local session=""
     if [ -n "$session_override" ]; then

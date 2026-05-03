@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tts-emit — agent-agnostic TTS generator.
+# tts-drop — agent-agnostic TTS generator.
 #
 # Reads text on stdin, generates audio via the configured engine, drops
 # the file atomically into a watch dir, and (optionally) deduplicates
@@ -10,7 +10,7 @@
 # responsible only for "find the text to speak"; emission is shared.
 #
 # Usage:
-#   echo "$text" | tts-emit --tag claude --drop-dir /tmp/tts-claude \
+#   echo "$text" | tts-drop --tag claude --drop-dir /tmp/tts-claude \
 #       [--kind stop|notif] [--session ID] \
 #       [--engine edge|openai] [--voice NAME] [--edge-voice NAME] \
 #       [--openai-model MODEL] [--openai-python BIN] [--edge-bin BIN] \
@@ -63,12 +63,12 @@ while [ $# -gt 0 ]; do
         --no-strip-markdown) STRIP_MD=0; shift ;;
         --log-file)       LOG_FILE="$2"; shift 2 ;;
         -h|--help)        usage ;;
-        *) echo "tts-emit: unknown arg: $1" >&2; exit 2 ;;
+        *) echo "tts-drop: unknown arg: $1" >&2; exit 2 ;;
     esac
 done
 
-[ -n "$DROP_DIR" ] || { echo "tts-emit: --drop-dir is required" >&2; exit 2; }
-[ -n "$TAG" ]      || { echo "tts-emit: --tag is required" >&2; exit 2; }
+[ -n "$DROP_DIR" ] || { echo "tts-drop: --drop-dir is required" >&2; exit 2; }
+[ -n "$TAG" ]      || { echo "tts-drop: --tag is required" >&2; exit 2; }
 
 # Default voices per engine (if --voice not given)
 if [ -z "$VOICE" ]; then
@@ -83,7 +83,7 @@ mkdir -p "$DROP_DIR" "$STAMP_DIR"
 
 log() {
     local line
-    line=$(printf '[%s] tts-emit(%s): %s' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TAG" "$*")
+    line=$(printf '[%s] tts-drop(%s): %s' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TAG" "$*")
     if [ -n "$LOG_FILE" ]; then
         printf '%s\n' "$line" >> "$LOG_FILE"
     else
@@ -120,7 +120,7 @@ fi
 # same dedup-key serialise — exactly one wins. GC stale claims so the same
 # key can be re-spoken later.
 if [ -n "$DEDUP_KEY" ]; then
-    claims_dir="$STAMP_DIR/tts-emit-claims"
+    claims_dir="$STAMP_DIR/tts-drop-claims"
     mkdir -p "$claims_dir"
     find "$claims_dir" -mindepth 1 -maxdepth 1 -type d \
         -mmin "+$(( (DEDUP_TTL + 59) / 60 ))" -exec rmdir {} + 2>/dev/null || true

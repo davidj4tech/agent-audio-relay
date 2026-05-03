@@ -6,13 +6,13 @@
 # agent-audio-relay watcher picks it up and delivers to the playback target.
 #
 # Engine selection, edge/openai fallback, atomic-mv into the drop dir,
-# and concurrent-invocation dedup all live in `tts-emit` — this hook
+# and concurrent-invocation dedup all live in `tts-drop` — this hook
 # is responsible only for finding the text to speak.
 #
 # Engine via CLAUDE_TTS_ENGINE (default: edge).
 #
 # Requirements:
-#   common: jq, tac, tts-emit on PATH (or RELAY_TTS_EMIT_BIN)
+#   common: jq, tac, tts-drop on PATH (or RELAY_TTS_DROP_BIN)
 #   edge:   edge-tts (pip/pipx)
 #   openai: python3 with the `openai` package, OPENAI_API_KEY in the hook env
 
@@ -22,8 +22,8 @@ DROP_DIR="${CLAUDE_TTS_DROP_DIR:-/tmp/tts-claude}"
 STAMP_DIR="${CLAUDE_TTS_STAMP_DIR:-${TMPDIR:-/tmp}}"
 mkdir -p "$STAMP_DIR" 2>/dev/null || true
 
-TTS_EMIT="${RELAY_TTS_EMIT_BIN:-$(dirname "$0")/../bin/tts-emit}"
-[ -x "$TTS_EMIT" ] || TTS_EMIT="tts-emit"
+TTS_DROP="${RELAY_TTS_DROP_BIN:-$(dirname "$0")/../bin/tts-drop}"
+[ -x "$TTS_DROP" ] || TTS_DROP="tts-drop"
 
 emit_args=(
     --tag claude
@@ -62,7 +62,7 @@ if [ -n "$notification_msg" ]; then
     fi
     echo "$now" > "$notif_stamp"
 
-    printf '%s' "$notification_msg" | "$TTS_EMIT" "${emit_args[@]}" --kind notif
+    printf '%s' "$notification_msg" | "$TTS_DROP" "${emit_args[@]}" --kind notif
     exit 0
 fi
 
@@ -100,9 +100,9 @@ text=$(tac "$transcript_path" \
 
 [ -z "$text" ] && exit 0
 
-# Hand off to tts-emit with --dedup-key so concurrent Stop invocations
+# Hand off to tts-drop with --dedup-key so concurrent Stop invocations
 # (duplicate Stop, or Stop + tail Notification) collapse atomically.
-if printf '%s' "$text" | "$TTS_EMIT" "${emit_args[@]}" --kind stop --dedup-key "$text" >/dev/null; then
+if printf '%s' "$text" | "$TTS_DROP" "${emit_args[@]}" --kind stop --dedup-key "$text" >/dev/null; then
     date +%s > "$STAMP_DIR/claude-tts-stop-last"
 fi
 exit 0
