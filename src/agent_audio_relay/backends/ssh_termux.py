@@ -179,6 +179,8 @@ class SshTermuxBackend(PlaybackBackend):
         #   YYYYMMDDTHHMMSS--<session>__<persona>_<agent>_<kind>
         links = [f"{archive_dir}/latest.{ext}"]
         stem = Path(name).stem
+        host_in_stem = ""
+        session = ""
         if "--" in stem and "__" in stem:
             try:
                 after_ts = stem.split("--", 1)[1]
@@ -186,7 +188,7 @@ class SshTermuxBackend(PlaybackBackend):
                 if "--" in left:
                     host_in_stem, session = left.split("--", 1)
                 else:
-                    host_in_stem, session = "", left
+                    session = left
                 parts = rest.split("_")
                 if session:
                     if host_in_stem:
@@ -199,6 +201,16 @@ class SshTermuxBackend(PlaybackBackend):
             except ValueError:
                 pass
         ln_cmds = " && ".join(f"ln -sf '{name}' '{lnk}'" for lnk in links)
+        # Pick the most-specific symlink to pass to mpv loadfile, so mpv's
+        # reported `path` matches what `tts-ctl replay_target` would resolve
+        # to. Otherwise toggle's path-equality check would always mismatch
+        # and reload-from-start instead of cycle pause.
+        if session and host_in_stem:
+            played_relpath = f"{archive_dir}/latest--{host_in_stem}--{session}.{ext}"
+        elif session:
+            played_relpath = f"{archive_dir}/latest--{session}.{ext}"
+        else:
+            played_relpath = archive
 
         for attempt in range(1, self.max_retries + 1):
             try:
@@ -213,7 +225,7 @@ class SshTermuxBackend(PlaybackBackend):
                     # Resolve $HOME on the phone — mpv loadfile needs an
                     # absolute path. .cache/... is relative to ~ on Termux.
                     abs_path = (
-                        "/data/data/com.termux/files/home/" + archive
+                        "/data/data/com.termux/files/home/" + played_relpath
                     )
                     payload = (
                         '{"command":["loadfile",'

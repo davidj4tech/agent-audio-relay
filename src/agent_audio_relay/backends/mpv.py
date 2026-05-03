@@ -124,7 +124,20 @@ class MpvBackend(PlaybackBackend):
                 lnk.symlink_to(archive.name)
             except OSError:
                 pass
-        return archive
+        # Return the most-specific symlink rather than the archive file. mpv
+        # reports back whatever path was passed to `loadfile`, and tts-ctl's
+        # `toggle` compares mpv's `path` property to the target resolved by
+        # `replay_target` (which always returns a `latest--…` symlink). If
+        # play() loadfiled the timestamped archive, every Space hit would
+        # see a path mismatch and trigger a reload-from-start. Loading the
+        # symlink keeps those equal and lets toggle cycle pause cheaply.
+        if session and host_in_stem:
+            most_specific = state / f"latest--{host_in_stem}--{session}{ext}"
+        elif session:
+            most_specific = state / f"latest--{session}{ext}"
+        else:
+            most_specific = state / f"latest{ext}"
+        return most_specific if most_specific.exists() else archive
 
     def play(self, path: Path) -> bool:
         playable = self._update_latest(path)
