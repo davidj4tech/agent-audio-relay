@@ -16,6 +16,8 @@
 #   H / L   seek -30s / +30s
 #   - / =   volume -5 / +5
 #   m       toggle mute
+#   [ / ]   slower / faster (speed × 1/1.1 / × 1.1)
+#   ?       show keymap in tmux status line
 #   q / Esc close
 #
 # Auto-closes TTS_POPUP_AUTO_CLOSE seconds after playback ends (default 10;
@@ -360,6 +362,8 @@ while true; do
         '-') "$TTS_CTL" volume -5 >/dev/null 2>&1 & disown ;;
         '=') "$TTS_CTL" volume 5  >/dev/null 2>&1 & disown ;;
         m)   "$TTS_CTL" mute     >/dev/null 2>&1 & disown ;;
+        '[') "$TTS_CTL" slower   >/dev/null 2>&1 & disown ;;
+        ']') "$TTS_CTL" faster   >/dev/null 2>&1 & disown ;;
         '?')
             # Help via tmux's display-message. Nested display-popup from
             # inside an existing popup gets refused/killed instantly on at
@@ -368,8 +372,8 @@ while true; do
             # message shows in the status area without nesting and with no
             # geometry constraints. -d 0 means "stay until cleared by next
             # status update" (which happens within status-interval).
-            tmux display-message -d 5000 \
-                "tts: Space=togl r=replay 0=start h/l=±5s H/L=±30s -/=vol m=mute q=quit" \
+            tmux display-message -d 7000 \
+                "tts: Space=togl r=replay 0=start h/l=±5s H/L=±30s -/=vol m=mute [/]=speed q=quit" \
                 2>/dev/null
             ;;
         q|$'\e') exit 0 ;;

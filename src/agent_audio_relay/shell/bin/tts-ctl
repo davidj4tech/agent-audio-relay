@@ -1,6 +1,6 @@
 #!/bin/bash
 # TTS playback control via mpv IPC.
-# Usage: tts-ctl pause|resume|toggle|replay [session]|seek SECS|start|volume DELTA|mute|status|nowplaying|get PROP...
+# Usage: tts-ctl pause|resume|toggle|replay [session]|seek SECS|start|volume DELTA|mute|slower|faster|speed N|status|nowplaying|get PROP...
 #
 # Talks to the mpv-tts daemon (Termux service `mpv-tts`) on the phone via
 # its JSON-IPC unix socket. When invoked on the phone the socket is hit
@@ -269,6 +269,9 @@ case "${1:-}" in
     start)   mpv_cmd '{"command":["seek",0,"absolute"]}'               >/dev/null ;;
     volume)  mpv_cmd "{\"command\":[\"add\",\"volume\",${2:-5}]}"      >/dev/null ;;
     mute)    mpv_cmd '{"command":["cycle","mute"]}'                    >/dev/null ;;
+    slower)  mpv_cmd '{"command":["multiply","speed",0.9091]}'         >/dev/null ;;
+    faster)  mpv_cmd '{"command":["multiply","speed",1.1]}'            >/dev/null ;;
+    speed)   mpv_cmd "{\"command\":[\"set_property\",\"speed\",${2:-1}]}" >/dev/null ;;
     status)
         # One IPC round-trip for all five properties.
         mapfile -t _vals < <(mpv_batch_get pause idle-active time-pos duration volume)
@@ -297,7 +300,7 @@ case "${1:-}" in
         mpv_batch_get "$@"
         ;;
     *)
-        echo "Usage: tts-ctl pause|resume|toggle|replay [session]|seek SECS|start|volume DELTA|mute|status|nowplaying|get PROP..." >&2
+        echo "Usage: tts-ctl pause|resume|toggle|replay [session]|seek SECS|start|volume DELTA|mute|slower|faster|speed N|status|nowplaying|get PROP..." >&2
         exit 1
         ;;
 esac
