@@ -104,26 +104,32 @@ nowplaying_label() {
 }
 
 bar() {
-    local pos="$1" dur="$2" width="$3" filled empty i
+    local pos="$1" dur="$2" width="$3" filled empty pad fill rest
     if [ -z "$pos" ] || [ -z "$dur" ] || [ "$pos" = "null" ] || [ "$dur" = "null" ]; then
-        for ((i=0; i<width; i++)); do printf '─'; done
+        printf -v pad '%*s' "$width" ''
+        printf '%s' "${pad// /─}"
         return
     fi
     filled=$(awk -v p="$pos" -v d="$dur" -v w="$width" \
         'BEGIN{ if(d<=0){print 0; exit} f=int((p/d)*w); if(f<0)f=0; if(f>w)f=w; print f }')
     empty=$((width - filled))
-    for ((i=0; i<filled; i++)); do printf '█'; done
-    for ((i=0; i<empty;  i++)); do printf '░'; done
+    fill="" rest=""
+    if [ "$filled" -gt 0 ]; then
+        printf -v pad '%*s' "$filled" ''
+        fill="${pad// /█}"
+    fi
+    if [ "$empty" -gt 0 ]; then
+        printf -v pad '%*s' "$empty" ''
+        rest="${pad// /░}"
+    fi
+    printf '%s%s' "$fill" "$rest"
 }
 
 # draw() exports IDLE as a side-effect so the main loop can drive the
 # auto-close timer without a second IPC round-trip.
 IDLE=
 draw() {
-    # Cursor-home (don't `clear`) so the previous frame stays visible while
-    # the next IPC round-trip is in flight — `clear` blanked the screen
-    # for the full ~RTT, producing visible flashing.
-    printf '\033[H'
+    # Build the full frame in a buffer and write atomically below.
     local paused idle pos dur vol path mute state cols barw
     # Read whatever the background fetcher most recently wrote. Stays
     # non-blocking so keypresses are never gated on an in-flight ssh RTT.
@@ -181,19 +187,25 @@ draw() {
     fi
     local vol_field="vol=${vol%.*}"
     [ "$mute" = "true" ] && vol_field+=" [M]"
-    # \033[K = erase to end of line — keeps prior-frame residue from leaking
-    # past shorter content (e.g. label getting shorter than last frame's).
-    printf 'TTS  %s\033[K\n' "$label"
-    printf '%s  %s ' "$state" "$(fmt_time "$pos")"
-    bar "$pos" "$dur" "$barw"
-    printf ' %s  %s\033[K\n' "$(fmt_time "$dur")" "$vol_field"
-    printf '\033[K\n'
-    printf '[Spc]togl  [r]eplay  [0]start\n'
-    printf '[h/l]±5s   [H/L]±30s\n'
-    printf '[-/=]vol   [m]ute    [q]uit'
-    # Erase any residue from a longer previous frame (e.g. transitioning
-    # from an active progress bar to "idle" with shorter content).
-    printf '\033[J'
+    local pos_t dur_t bar_str
+    pos_t=$(fmt_time "$pos")
+    dur_t=$(fmt_time "$dur")
+    bar_str=$(bar "$pos" "$dur" "$barw")
+    # Build the whole frame in one buffer and emit with a single printf.
+    # tmux's popup renderer applies the entire write atomically, so the
+    # user never sees the bar half-drawn or the label arrive before the
+    # state line — eliminates the visible flicker. \033[K (erase to EOL)
+    # keeps prior-frame residue from leaking past shorter new content;
+    # \033[J at the bottom wipes anything below the current frame.
+    local frame=$'\033[H'
+    frame+="TTS  ${label}"$'\033[K\n'
+    frame+="${state}  ${pos_t} ${bar_str} ${dur_t}  ${vol_field}"$'\033[K\n'
+    frame+=$'\033[K\n'
+    frame+='[Spc]togl  [r]eplay  [0]start'$'\n'
+    frame+='[h/l]±5s   [H/L]±30s'$'\n'
+    frame+='[-/=]vol   [m]ute    [q]uit'
+    frame+=$'\033[J'
+    printf '%s' "$frame"
 }
 
 REFRESH="${TTS_POPUP_REFRESH:-0.5}"   # how often the background fetcher polls mpv
