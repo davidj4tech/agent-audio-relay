@@ -48,6 +48,12 @@ while true; do
     # ExitOnForwardFailure: bail immediately if the forward can't be set up
     # (e.g. local-socket bind error), so we don't sit in a half-connected
     # ssh thinking we're forwarding when we're not.
+    # ControlPath=none: bypass any existing user-level ssh ControlMaster for
+    # this host. With it, `ssh -N -L` would otherwise attach as a slave to
+    # the existing master, immediately exit (the slave has no command
+    # channel), and the forward is never persisted — the tunnel script
+    # would just spin in a reconnect loop without ever establishing a
+    # working unix socket.
     ssh -N \
         -L "${LOCAL_SOCK}:${REMOTE_SOCK}" \
         -o BatchMode=yes \
@@ -56,6 +62,7 @@ while true; do
         -o ServerAliveCountMax=2 \
         -o ExitOnForwardFailure=yes \
         -o StreamLocalBindUnlink=yes \
+        -o ControlPath=none \
         "$REMOTE_HOST" 2>&1
     rc=$?
     rm -f "$LOCAL_SOCK"
