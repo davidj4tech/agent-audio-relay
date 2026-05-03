@@ -138,8 +138,11 @@ replay_target() {
             probe_script+="ls -t1 $globs 2>/dev/null | head -n1"
         fi
         local probe
+        # Force bash on the remote so unmatched globs in the fallback don't
+        # abort under zsh's default NOMATCH (Termux user shell is often zsh).
         # shellcheck disable=SC2086
-        probe=$(ssh -o BatchMode=yes ${CLAUDE_TTS_SSH_OPTS:-} "$PHONE_HOST" "$probe_script" 2>/dev/null)
+        probe=$(ssh -o BatchMode=yes ${CLAUDE_TTS_SSH_OPTS:-} "$PHONE_HOST" \
+            "bash -c $(printf '%q' "$probe_script")" 2>/dev/null)
         [ -n "$probe" ] && { printf '%s' "$probe"; return; }
     fi
     # Nothing matched — fall back to the highest-priority stem, first ext.
