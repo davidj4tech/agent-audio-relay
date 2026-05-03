@@ -361,17 +361,17 @@ while true; do
         '=') "$TTS_CTL" volume 5  >/dev/null 2>&1 & disown ;;
         m)   "$TTS_CTL" mute     >/dev/null 2>&1 & disown ;;
         '?')
-            # Nested popup with the help text. Logs to /tmp/tts-popup-help.log
-            # for debugging since the popup hides any errors.
+            # Nested popup with the help text. Centered (default position)
+            # so it doesn't get cropped off small terminals. `tail -f
+            # /dev/null` keeps the popup alive until user dismisses with
+            # Esc (tmux popups close their child on Esc by default — kills
+            # tail, popup goes away, control returns here).
             {
                 echo "[$(date '+%Y-%m-%d %H:%M:%S')] ? pressed"
-                echo "  HELP_FILE=$HELP_FILE"
-                echo "  exists=$([ -f "$HELP_FILE" ] && echo yes || echo no)"
-                echo "  size=$(wc -c < "$HELP_FILE" 2>/dev/null || echo missing)"
-                echo "  TMUX=${TMUX:-(unset)}"
+                echo "  HELP_FILE=$HELP_FILE size=$(wc -c < "$HELP_FILE" 2>/dev/null)"
             } >> /tmp/tts-popup-help.log 2>&1
-            tmux display-popup -E -w 44 -h 18 -x R -y 2 \
-                "cat \"$HELP_FILE\"; sleep 999" \
+            tmux display-popup -E -w 50 -h 16 \
+                "cat \"$HELP_FILE\"; tail -f /dev/null" \
                 2>>/tmp/tts-popup-help.log
             echo "  display-popup exit=$?" >> /tmp/tts-popup-help.log
             _LAST_FRAME=""  # force redraw on return
