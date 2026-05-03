@@ -2,13 +2,17 @@
 # Interactive tts-popup — meant to run inside `tmux display-popup -E`.
 # Talks to the mpv-tts daemon via tts-ctl. Single-key hotkeys:
 #   Space   toggle play/pause
-#   p       pause
-#   R       resume
 #   r       replay (current tmux session)
+#   0       seek to start of current clip
 #   h / l   seek -5s / +5s
 #   H / L   seek -30s / +30s
 #   - / =   volume -5 / +5
+#   m       toggle mute
 #   q / Esc close
+#
+# Auto-closes TTS_POPUP_AUTO_CLOSE seconds after playback ends (default 10;
+# set to 0 to disable). Only arms after we've observed mpv playing at least
+# once, so opening the popup while idle doesn't insta-close.
 set -u
 TTS_CTL="${TTS_CTL:-tts-ctl}"
 
@@ -86,12 +90,17 @@ bar() {
     for ((i=0; i<empty;  i++)); do printf '░'; done
 }
 
+# draw() exports IDLE as a side-effect so the main loop can drive the
+# auto-close timer without a second IPC round-trip.
+IDLE=
 draw() {
     clear
-    local v paused idle pos dur vol path state cols barw
-    mapfile -t v < <("$TTS_CTL" get pause idle-active time-pos duration volume path 2>/dev/null)
+    local v paused idle pos dur vol path mute state cols barw
+    mapfile -t v < <("$TTS_CTL" get pause idle-active time-pos duration volume path mute 2>/dev/null)
     paused="${v[0]:-}"; idle="${v[1]:-}"; pos="${v[2]:-}"
     dur="${v[3]:-}";    vol="${v[4]:-}";  path="${v[5]:-}"
+    mute="${v[6]:-}"
+    IDLE="$idle"
     if [ "$idle" = "true" ] || [ -z "$paused" ]; then
         state='○ idle    '
     elif [ "$paused" = "true" ]; then
@@ -112,20 +121,40 @@ draw() {
     else
         label=$(nowplaying_label "$path")
     fi
+    local vol_field="vol=${vol%.*}"
+    [ "$mute" = "true" ] && vol_field+=" [M]"
     printf 'TTS  %s\n' "$label"
     printf '%s  %s ' "$state" "$(fmt_time "$pos")"
     bar "$pos" "$dur" "$barw"
-    printf ' %s  vol=%s\n' "$(fmt_time "$dur")" "${vol%.*}"
+    printf ' %s  %s\n' "$(fmt_time "$dur")" "$vol_field"
     printf '\n'
-    printf '[Spc]togl  [p]ause  [R]esume\n'
-    printf '[r]eplay   [h/l]±5s [H/L]±30s\n'
-    printf '[-/=]vol   [q]uit\n'
+    printf '[Spc]togl  [r]eplay  [0]start\n'
+    printf '[h/l]±5s   [H/L]±30s\n'
+    printf '[-/=]vol   [m]ute    [q]uit\n'
 }
 
 REFRESH="${TTS_POPUP_REFRESH:-1}"
+AUTO_CLOSE_IDLE="${TTS_POPUP_AUTO_CLOSE:-10}"
+
+# Auto-close state: only fire after we've actually seen mpv playing, so
+# opening the popup while idle doesn't insta-close.
+EVER_PLAYED=0
+IDLE_SINCE=
 
 while true; do
     draw
+    # Auto-close bookkeeping (uses $IDLE set as a side-effect of draw).
+    if [ "$IDLE" != "true" ] && [ -n "$IDLE" ]; then
+        EVER_PLAYED=1
+        IDLE_SINCE=
+    elif [ "$IDLE" = "true" ] && [ "$EVER_PLAYED" = "1" ]; then
+        : "${IDLE_SINCE:=$SECONDS}"
+        if [ "$AUTO_CLOSE_IDLE" -gt 0 ] \
+            && [ $((SECONDS - IDLE_SINCE)) -ge "$AUTO_CLOSE_IDLE" ]; then
+            exit 0
+        fi
+    fi
+
     # -t REFRESH: redraw on a timer so position/duration tick live while
     # the popup is open. Empty key on timeout just falls through to redraw.
     IFS= read -r -s -n1 -t "$REFRESH" key
@@ -138,15 +167,24 @@ while true; do
     fi
     case "$key" in
         ' ') "$TTS_CTL" toggle "$SESSION" ;;
-        p)   "$TTS_CTL" pause  ;;
-        R)   "$TTS_CTL" resume ;;
         r)   "$TTS_CTL" replay "$SESSION" ;;
+        0)   "$TTS_CTL" start  ;;
         h)   "$TTS_CTL" seek -5  ;;
         l)   "$TTS_CTL" seek 5   ;;
         H)   "$TTS_CTL" seek -30 ;;
         L)   "$TTS_CTL" seek 30  ;;
         '-') "$TTS_CTL" volume -5 ;;
         '=') "$TTS_CTL" volume 5  ;;
+        m)   "$TTS_CTL" mute   ;;
         q|$'\e') exit 0 ;;
+        *)   continue ;;
     esac
+    # mpv applies seek/loadfile asynchronously — without a brief settle
+    # the next draw may render the pre-change position. 50ms is below the
+    # noticeable threshold and well under one network RTT to the phone.
+    sleep 0.05
+    # Any user activity rearms the idle timer: if the keypress loaded a
+    # fresh clip from idle, we want the new playback to count, not the
+    # earlier idle window.
+    IDLE_SINCE=
 done
