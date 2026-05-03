@@ -94,7 +94,10 @@ bar() {
 # auto-close timer without a second IPC round-trip.
 IDLE=
 draw() {
-    clear
+    # Cursor-home (don't `clear`) so the previous frame stays visible while
+    # the next IPC round-trip is in flight — `clear` blanked the screen
+    # for the full ~RTT, producing visible flashing.
+    printf '\033[H'
     local v paused idle pos dur vol path mute state cols barw
     mapfile -t v < <("$TTS_CTL" get pause idle-active time-pos duration volume path mute 2>/dev/null)
     paused="${v[0]:-}"; idle="${v[1]:-}"; pos="${v[2]:-}"
@@ -123,14 +126,19 @@ draw() {
     fi
     local vol_field="vol=${vol%.*}"
     [ "$mute" = "true" ] && vol_field+=" [M]"
-    printf 'TTS  %s\n' "$label"
+    # \033[K = erase to end of line — keeps prior-frame residue from leaking
+    # past shorter content (e.g. label getting shorter than last frame's).
+    printf 'TTS  %s\033[K\n' "$label"
     printf '%s  %s ' "$state" "$(fmt_time "$pos")"
     bar "$pos" "$dur" "$barw"
-    printf ' %s  %s\n' "$(fmt_time "$dur")" "$vol_field"
-    printf '\n'
+    printf ' %s  %s\033[K\n' "$(fmt_time "$dur")" "$vol_field"
+    printf '\033[K\n'
     printf '[Spc]togl  [r]eplay  [0]start\n'
     printf '[h/l]±5s   [H/L]±30s\n'
-    printf '[-/=]vol   [m]ute    [q]uit\n'
+    printf '[-/=]vol   [m]ute    [q]uit'
+    # Erase any residue from a longer previous frame (e.g. transitioning
+    # from an active progress bar to "idle" with shorter content).
+    printf '\033[J'
 }
 
 REFRESH="${TTS_POPUP_REFRESH:-1}"
