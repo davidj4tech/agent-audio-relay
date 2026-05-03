@@ -1,6 +1,10 @@
 #!/bin/bash
 # Interactive tts-popup — meant to run inside `tmux display-popup -E`.
-# Talks to the mpv-tts daemon via tts-ctl. Single-key hotkeys:
+# One-line layout (suitable for `display-popup -E -w 70% -h 3` or similar):
+#
+#   aar  ▶ 00:08  ████░░░░░░░░░░░░░░░  00:41  vol=114
+#
+# Single-key hotkeys (no on-screen hints — keep popup compact; see README):
 #   Space   toggle play/pause
 #   r       replay (current tmux session)
 #   0       seek to start of current clip
@@ -15,6 +19,11 @@
 # once, so opening the popup while idle doesn't insta-close.
 set -u
 TTS_CTL="${TTS_CTL:-tts-ctl}"
+
+# Hide the cursor while the popup runs — without this the terminal cursor
+# briefly visible at top-left between frames reads as flicker. Restored
+# in _cleanup on EXIT.
+printf '\033[?25l'
 
 # Pin the popup to a specific tmux session so toggle/replay always target
 # this session's clip — never the global `latest` symlink, which on a shared
@@ -128,6 +137,7 @@ bar() {
 # draw() exports IDLE as a side-effect so the main loop can drive the
 # auto-close timer without a second IPC round-trip.
 IDLE=
+_LAST_FRAME=""
 draw() {
     # Build the full frame in a buffer and write atomically below.
     local paused idle pos dur vol path mute state cols barw
@@ -153,17 +163,20 @@ draw() {
                 printf "%.3f", p;
             }')
     fi
+    # Compact state glyph (one cell) so the popup line stays one-row.
     if [ "$idle" = "true" ] || [ -z "$paused" ]; then
-        state='○ idle    '
+        state='○'
     elif [ "$paused" = "true" ]; then
-        state='⏸  PAUSED '
+        state='⏸'
     else
-        state='▶  PLAYING'
+        state='▶'
     fi
     cols="${COLUMNS:-80}"
-    barw=$(( cols - 30 ))
-    [ "$barw" -lt 10 ] && barw=10
-    [ "$barw" -gt 60 ] && barw=60
+    # Reserve space for: label (~15) + state (1) + " " + pos (5) + "  " +
+    # " " + dur (5) + "  " + vol_field (~9) + a couple of spacers ≈ 40.
+    barw=$(( cols - 40 ))
+    [ "$barw" -lt 8 ] && barw=8
+    [ "$barw" -gt 50 ] && barw=50
 
     # Detect "we asked mpv to load and nothing happened" so the user knows
     # Space did something — without it, a session that has no clip on the
@@ -197,15 +210,20 @@ draw() {
     # state line — eliminates the visible flicker. \033[K (erase to EOL)
     # keeps prior-frame residue from leaking past shorter new content;
     # \033[J at the bottom wipes anything below the current frame.
+    # One-line layout. \033[K erases any prior-frame residue; \033[J
+    # below wipes anything that was drawn on lines 2+ by an older popup.
     local frame=$'\033[H'
-    frame+="TTS  ${label}"$'\033[K\n'
-    frame+="${state}  ${pos_t} ${bar_str} ${dur_t}  ${vol_field}"$'\033[K\n'
-    frame+=$'\033[K\n'
-    frame+='[Spc]togl  [r]eplay  [0]start'$'\n'
-    frame+='[h/l]±5s   [H/L]±30s'$'\n'
-    frame+='[-/=]vol   [m]ute    [q]uit'
-    frame+=$'\033[J'
-    printf '%s' "$frame"
+    frame+="${label}  ${state} ${pos_t} ${bar_str} ${dur_t}  ${vol_field}"
+    frame+=$'\033[K\033[J'
+    # Only emit if the rendered output changed. Bar cells only cross a
+    # boundary every ~(duration/width) seconds, but draw() runs every
+    # TICK (~0.15s) — without this gate we'd repaint identical frames
+    # 6-7×/sec, which the terminal renders as visible flicker on the
+    # bar cells. Comparing the whole frame string is cheap (no fork).
+    if [ "$frame" != "$_LAST_FRAME" ]; then
+        printf '%s' "$frame"
+        _LAST_FRAME="$frame"
+    fi
 }
 
 REFRESH="${TTS_POPUP_REFRESH:-0.5}"   # how often the background fetcher polls mpv
@@ -253,6 +271,9 @@ _refetch_state() {
 FETCH_PID=$!
 
 _cleanup() {
+    # Restore cursor visibility (we hid it at startup to avoid mid-frame
+    # cursor blink showing as flicker).
+    printf '\033[?25h'
     kill "$FETCH_PID" 2>/dev/null
     rm -f "$STATE_FILE" "$STATE_FILE.tmp"
     if [ -n "$_CTL_PATH" ] && [ -S "$_CTL_PATH" ]; then

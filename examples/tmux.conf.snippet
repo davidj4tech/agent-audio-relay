@@ -3,8 +3,8 @@
 #     source-file ~/path/to/agent-audio-relay/examples/tmux.conf.snippet
 #
 # `prefix T` enters the `tts` key table; subsequent keys:
-#   t      → interactive popup (Space toggle, r replay, h/l ±5s, H/L ±30s,
-#            -/= volume, p pause, R resume, q close)
+#   t      → interactive popup (one-line; hotkeys: Space toggle, r replay,
+#            0 start, h/l ±5s, H/L ±30s, -/= vol, m mute, q close)
 #   Space  → toggle play/pause (one-shot)
 #   r      → replay latest from current tmux session
 
@@ -13,6 +13,8 @@ bind T switch-client -T tts
 # which can resolve to the popup's own pane and miss the invoking session —
 # at which point tts-ctl silently falls back to the global `latest` symlink
 # and you hear a clip from some unrelated host/session).
-bind -T tts t     display-popup -E -w 95% -h 7 "TTS_POPUP_SESSION='#{session_name}' ~/.local/bin/tts-popup"
+# `-h 3` because tmux popups render with a 1-row top + 1-row bottom border;
+# `-h 3` gives a single visible content row, which is all this layout needs.
+bind -T tts t     display-popup -E -w 75% -h 3 "TTS_POPUP_SESSION='#{session_name}' ~/.local/bin/tts-popup"
 bind -T tts Space run-shell "~/.local/bin/tts-ctl toggle '#{session_name}' ; tmux display-message \"TTS $(~/.local/bin/tts-ctl status)\""
 bind -T tts r     run-shell "~/.local/bin/tts-ctl replay '#{session_name}' ; tmux display-message \"TTS replay\""
