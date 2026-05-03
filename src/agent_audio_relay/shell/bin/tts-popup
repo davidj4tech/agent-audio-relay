@@ -361,13 +361,13 @@ while true; do
         '=') "$TTS_CTL" volume 5  >/dev/null 2>&1 & disown ;;
         m)   "$TTS_CTL" mute     >/dev/null 2>&1 & disown ;;
         '?')
-            # Nested popup with the help text. Force `bash -c` because
-            # tmux runs the shell-command via `/bin/sh -c` (often dash),
-            # which doesn't support `read -n1 -s`. Without bash, the
-            # help popup would exit immediately (read failing) before
-            # the user could see anything.
+            # Nested popup with the help text. Use `sleep 999` (rather
+            # than a `read` builtin that varies between shells) and rely
+            # on tmux's popup behaviour: pressing Esc dismisses the popup
+            # by killing its child. The shell-command is run by /bin/sh
+            # (often dash), so we keep this to portable utilities only.
             tmux display-popup -E -w 44 -h 18 -x R -y 2 \
-                "bash -c 'cat \"$HELP_FILE\"; read -n1 -s'" 2>/dev/null
+                "cat \"$HELP_FILE\"; sleep 999" 2>/dev/null
             _LAST_FRAME=""  # force redraw on return
             ;;
         q|$'\e') exit 0 ;;
