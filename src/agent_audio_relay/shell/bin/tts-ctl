@@ -89,13 +89,13 @@ replay_target() {
         hslug=$(host_slug)
         [ -n "$hslug" ] && candidates+=("$ARCHIVE_DIR/latest--$hslug--$sslug")
         candidates+=("$ARCHIVE_DIR/latest--$sslug")
+    else
+        # Only fall back to the global `latest` symlink when no session
+        # was given at all — never as a session-mismatch fallback (that
+        # would replay clips from other hosts/sessions, which is the bug
+        # session-pinning was added to fix).
+        candidates+=("$ARCHIVE_DIR/latest")
     fi
-    # Global `latest` is the final fallback: better to replay *something*
-    # than silently no-op when no session-specific clip exists yet
-    # (e.g. a tmux session that hasn't had any TTS output since the
-    # host-namespacing change shipped). The popup label will show "global"
-    # so the user can see they got the fallback rather than session audio.
-    candidates+=("$ARCHIVE_DIR/latest")
     # Prefer a remote-existing match; mpv loadfile of a missing path is
     # a silent no-op, which is worse UX than picking *something* and
     # letting mpv error out visibly.
@@ -134,14 +134,19 @@ case "${1:-}" in
     pause)   mpv_cmd '{"command":["set_property","pause",true]}'  >/dev/null ;;
     resume)  mpv_cmd '{"command":["set_property","pause",false]}' >/dev/null ;;
     toggle)
-        # If mpv has nothing useful to resume — either truly idle, or sitting
-        # at EOF with the previous clip still loaded — load the latest clip
-        # for this session. Otherwise just flip pause. (mpv with the default
-        # keep-open behavior leaves the file loaded after playback ends, so
-        # idle-active alone misses the "clip just finished" case.)
-        mapfile -t _state < <(mpv_batch_get idle-active eof-reached)
-        if [ "${_state[0]:-}" = "true" ] || [ "${_state[1]:-}" = "true" ]; then
-            target=$(replay_target "${2:-}")
+        # Reload-or-pause. The user-mental-model for Space in a session-pinned
+        # popup is "play my session's clip". So we reload whenever:
+        #   - mpv is idle (nothing loaded), OR
+        #   - mpv is at EOF (clip finished; default keep-open leaves file
+        #     loaded but eof-reached=true), OR
+        #   - the currently-loaded path differs from this session's target
+        #     (e.g. some other session's clip was the last thing played).
+        # Only flip pause when the right clip is already loaded mid-playback.
+        target=$(replay_target "${2:-}")
+        mapfile -t _state < <(mpv_batch_get idle-active eof-reached path)
+        if [ "${_state[0]:-}" = "true" ] \
+            || [ "${_state[1]:-}" = "true" ] \
+            || [ "${_state[2]:-}" != "$target" ]; then
             mpv_cmd "{\"command\":[\"loadfile\",\"$target\",\"replace\"]}" >/dev/null
             mpv_cmd '{"command":["set_property","pause",false]}'           >/dev/null
         else

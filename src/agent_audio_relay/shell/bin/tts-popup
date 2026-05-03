@@ -116,13 +116,25 @@ draw() {
     [ "$barw" -lt 10 ] && barw=10
     [ "$barw" -gt 60 ] && barw=60
 
+    # Detect "we asked mpv to load and nothing happened" so the user knows
+    # Space did something — without it, a session that has no clip on the
+    # phone looks identical to Space being broken.
     local label
-    if [ -z "$path" ] || [ "$path" = "null" ]; then
-        # mpv is idle — surface the session this popup is pinned to so
-        # the user knows what Space-after-idle will load.
-        [ -n "$SESSION" ] && label="(idle: $SESSION)" || label="(idle)"
-    else
-        label=$(nowplaying_label "$path")
+    if [ -n "${LOAD_PENDING_SINCE:-}" ]; then
+        if [ "$idle" != "true" ] && [ -n "$idle" ]; then
+            LOAD_PENDING_SINCE=  # mpv started a clip; clear pending state
+        elif [ $((SECONDS - LOAD_PENDING_SINCE)) -ge 2 ]; then
+            label="(no clip for session: ${SESSION:-?})"
+        fi
+    fi
+    if [ -z "${label:-}" ]; then
+        if [ -z "$path" ] || [ "$path" = "null" ]; then
+            # mpv is idle — surface the session this popup is pinned to so
+            # the user knows what Space-after-idle will load.
+            [ -n "$SESSION" ] && label="(idle: $SESSION)" || label="(idle)"
+        else
+            label=$(nowplaying_label "$path")
+        fi
     fi
     local vol_field="vol=${vol%.*}"
     [ "$mute" = "true" ] && vol_field+=" [M]"
@@ -149,6 +161,11 @@ AUTO_CLOSE_IDLE="${TTS_POPUP_AUTO_CLOSE:-10}"
 EVER_PLAYED=0
 IDLE_SINCE=
 
+# Set by Space/r when we expect mpv to start playing. Cleared by draw()
+# once mpv reports non-idle. If still idle 2s later, draw() shows
+# "(no clip for session: ...)" so the user sees Space did *something*.
+LOAD_PENDING_SINCE=
+
 while true; do
     draw
     # Auto-close bookkeeping (uses $IDLE set as a side-effect of draw).
@@ -174,8 +191,8 @@ while true; do
         break
     fi
     case "$key" in
-        ' ') "$TTS_CTL" toggle "$SESSION" ;;
-        r)   "$TTS_CTL" replay "$SESSION" ;;
+        ' ') "$TTS_CTL" toggle "$SESSION"; LOAD_PENDING_SINCE=$SECONDS ;;
+        r)   "$TTS_CTL" replay "$SESSION"; LOAD_PENDING_SINCE=$SECONDS ;;
         0)   "$TTS_CTL" start  ;;
         h)   "$TTS_CTL" seek -5  ;;
         l)   "$TTS_CTL" seek 5   ;;
