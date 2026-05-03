@@ -132,7 +132,12 @@ replay_target() {
     #      cross-session collisions.
     #   2. Glob fallback for historical clips that pre-date the per-session
     #      symlink writes: most-recent `*--<session>__*.<ext>` by mtime.
-    if [ -S "$SOCK" ]; then
+    # `[ -S "$SOCK" ]` was the local-vs-remote discriminator before the
+    # ssh tunnel existed; with it, SOCK is a local-side forwarded socket
+    # but ARCHIVE_DIR is still a phone path. Separate the checks: the
+    # local filesystem branch only applies when ARCHIVE_DIR actually
+    # resolves on this host (i.e. we are the phone).
+    if [ -d "$ARCHIVE_DIR" ]; then
         local stem
         for stem in "${candidates[@]}"; do
             for ext in "${EXTS[@]}"; do
