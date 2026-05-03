@@ -361,20 +361,16 @@ while true; do
         '=') "$TTS_CTL" volume 5  >/dev/null 2>&1 & disown ;;
         m)   "$TTS_CTL" mute     >/dev/null 2>&1 & disown ;;
         '?')
-            # Nested popup with the help text. Centered (default position)
-            # so it doesn't get cropped off small terminals. `tail -f
-            # /dev/null` keeps the popup alive until user dismisses with
-            # Esc (tmux popups close their child on Esc by default — kills
-            # tail, popup goes away, control returns here).
-            {
-                echo "[$(date '+%Y-%m-%d %H:%M:%S')] ? pressed"
-                echo "  HELP_FILE=$HELP_FILE size=$(wc -c < "$HELP_FILE" 2>/dev/null)"
-            } >> /tmp/tts-popup-help.log 2>&1
-            tmux display-popup -E -w 50 -h 16 \
-                "cat \"$HELP_FILE\"; tail -f /dev/null" \
-                2>>/tmp/tts-popup-help.log
-            echo "  display-popup exit=$?" >> /tmp/tts-popup-help.log
-            _LAST_FRAME=""  # force redraw on return
+            # Help via tmux's display-message. Nested display-popup from
+            # inside an existing popup gets refused/killed instantly on at
+            # least some tmux versions (we logged display-popup exit=0
+            # within milliseconds even with `tail -f /dev/null`). display-
+            # message shows in the status area without nesting and with no
+            # geometry constraints. -d 0 means "stay until cleared by next
+            # status update" (which happens within status-interval).
+            tmux display-message -d 5000 \
+                "tts: Space=togl r=replay 0=start h/l=±5s H/L=±30s -/=vol m=mute q=quit" \
+                2>/dev/null
             ;;
         q|$'\e') exit 0 ;;
         *)   continue ;;
