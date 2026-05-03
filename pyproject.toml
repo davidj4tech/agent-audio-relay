@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-audio-relay"
-version = "0.3.0"
+version = "0.3.1"
 description = "Bidirectional voice interface for coding agents — TTS from agent responses to pluggable playback targets, with hooks for Claude Code, Codex, OpenCode, and Home Assistant"
 readme = "README.md"
 license = { file = "LICENSE" }

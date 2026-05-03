@@ -27,16 +27,18 @@ make_stem() {
     local ts
     ts=$(date -u +%Y%m%dT%H%M%S)
 
-    local session
+    # Initialize locals to "" — tts-emit runs `set -u`, which would error on
+    # `[ -z "$session" ]` if neither branch above assigned the variable.
+    local session=""
     if [ -n "$session_override" ]; then
         session=$(_denote_slug "$session_override")
     elif [ -n "${TMUX_PANE:-}" ]; then
-        session=$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)
+        session=$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null || true)
         session=$(_denote_slug "$session")
     fi
     [ -z "$session" ] && session="nosession"
 
-    local persona
+    local persona=""
     persona=$(_denote_slug "${USER:-unknown}")
     [ -z "$persona" ] && persona="unknown"
 
