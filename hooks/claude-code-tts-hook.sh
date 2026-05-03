@@ -192,20 +192,16 @@ if [ -z "$clean" ]; then
     exit 0
 fi
 
-# Debounce: skip if the same response text was just spoken (Stop hook can
-# fire more than once per turn, which would double-play the audio).
-hash_stamp="$STAMP_DIR/claude-tts-stop-last-hash"
+# Atomic dedup: Stop hook can fire near-concurrently (duplicate Stop, or
+# Stop + Notification), and a read-then-write stamp races — both readers see
+# the old value, both write, both proceed, two clips play back-to-back.
+# `mkdir` is atomic on POSIX: exactly one caller succeeds per text_hash.
 text_hash=$(printf '%s' "$clean" | sha1sum | cut -d' ' -f1)
-now=$(date +%s)
-if [ -f "$hash_stamp" ]; then
-    last_hash=$(cut -d' ' -f1 "$hash_stamp" 2>/dev/null)
-    last_time=$(cut -d' ' -f2 "$hash_stamp" 2>/dev/null)
-    if [ "$last_hash" = "$text_hash" ] && [ -n "$last_time" ] \
-        && [ $(( now - last_time )) -lt 60 ]; then
-        exit 0
-    fi
-fi
-echo "$text_hash $now" > "$hash_stamp"
+claims_dir="$STAMP_DIR/claude-tts-claims"
+mkdir -p "$claims_dir" 2>/dev/null || true
+# GC claims older than 5 min so a hash can be re-spoken later.
+find "$claims_dir" -mindepth 1 -maxdepth 1 -type d -mmin +5 -exec rmdir {} + 2>/dev/null || true
+mkdir "$claims_dir/$text_hash" 2>/dev/null || exit 0
 
 # Generate audio in a staging file outside the watched dir, then atomically
 # rename in. This avoids the watcher seeing intermediate close_write events
