@@ -48,9 +48,12 @@ tmux bind "$PREFIX_KEY" switch-client -T tts
 #   t      → small key-capture popup pinned top-right (interactive control)
 #   Space  → toggle play/pause for the current session (one-shot)
 #   r      → replay the current session's latest clip (one-shot)
+# `display-popup` does not format-expand its shell-command argument,
+# so we route the session via tmux's set-environment (which does).
 tmux bind -T tts t \
+    set-environment -g TTS_POPUP_SESSION '#{session_name}' \\\; \
     display-popup -E -w "$POPUP_W" -h "$POPUP_H" -x "$POPUP_X" -y "$POPUP_Y" \
-    "TTS_POPUP_SESSION='#{session_name}' tts-popup"
+    'tts-popup'
 tmux bind -T tts Space run-shell "tts-ctl toggle '#{session_name}'"
 tmux bind -T tts r     run-shell "tts-ctl replay '#{session_name}'"
 

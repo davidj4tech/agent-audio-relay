@@ -14,6 +14,13 @@ bind T switch-client -T tts
 # only needs to capture key events. -w 22 -h 3 is the smallest tmux popup
 # that fits the `▶ <session>` indicator with default border. -x R -y 0
 # anchors top-right.
-bind -T tts t     display-popup -E -w 22 -h 3 -x R -y 0 "TTS_POPUP_SESSION='#{session_name}' ~/.local/bin/tts-popup"
+# Use set-environment (which DOES format-expand) to get the session name
+# into the popup. tmux's `display-popup` does NOT format-expand its shell-
+# command argument, so we can't pass `'#{session_name}'` directly inside
+# the command string — it'd arrive as a literal placeholder. The popup
+# script defensively recovers via `tmux display-message` if it sees a
+# literal `#{` in TTS_POPUP_SESSION, but the explicit set-environment is
+# the correct primary route.
+bind -T tts t     set-environment -g TTS_POPUP_SESSION "#{session_name}" \; display-popup -E -w 22 -h 3 -x R -y 0 "~/.local/bin/tts-popup"
 bind -T tts Space run-shell "~/.local/bin/tts-ctl toggle '#{session_name}'"
 bind -T tts r     run-shell "~/.local/bin/tts-ctl replay '#{session_name}'"

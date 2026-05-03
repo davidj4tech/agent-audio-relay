@@ -59,6 +59,13 @@ EOF
 # passes the session in via TTS_POPUP_SESSION; if missing we try to recover
 # from the inherited TMUX env, but the binding is the reliable path.
 SESSION="${TTS_POPUP_SESSION:-}"
+# Defensive: tmux's `display-popup` (unlike `run-shell`) doesn't format-
+# expand its shell-command argument, so a binding like
+#     display-popup -E "TTS_POPUP_SESSION='#{session_name}' tts-popup"
+# would pass the literal string `#{session_name}` through. Strip it.
+case "$SESSION" in
+    *'#{'*) SESSION="" ;;
+esac
 if [ -z "$SESSION" ] && [ -n "${TMUX:-}" ]; then
     SESSION=$(tmux display-message -p '#S' 2>/dev/null || true)
 fi
