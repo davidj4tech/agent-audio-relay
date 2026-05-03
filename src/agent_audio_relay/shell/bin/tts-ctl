@@ -117,9 +117,9 @@ replay_target() {
             done
         done
         if [ -n "$session" ]; then
-            local newest
+            local newest ext
             for ext in "${EXTS[@]}"; do
-                newest=$(ls -t1 "$ARCHIVE_DIR"/*--"$sslug"__*."$ext" 2>/dev/null | head -n1)
+                newest=$(ls -t1 "$ARCHIVE_DIR"/*--"${sslug}"__*."$ext" 2>/dev/null | head -n1)
                 [ -n "$newest" ] && { printf '%s' "$newest"; return; }
             done
         fi
@@ -133,7 +133,7 @@ replay_target() {
         if [ -n "$session" ]; then
             local globs="" ext
             for ext in "${EXTS[@]}"; do
-                globs+="$ARCHIVE_DIR/*--$sslug__*.$ext "
+                globs+="$ARCHIVE_DIR/*--${sslug}__*.$ext "
             done
             probe_script+="ls -t1 $globs 2>/dev/null | head -n1"
         fi
