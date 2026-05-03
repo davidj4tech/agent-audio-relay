@@ -21,9 +21,20 @@ draw() {
     printf '[-/=]vol   [q]uit\n'
 }
 
+REFRESH="${TTS_POPUP_REFRESH:-1}"
+
 while true; do
     draw
-    IFS= read -r -s -n1 key || break
+    # -t REFRESH: redraw on a timer so position/duration tick live while
+    # the popup is open. Empty key on timeout just falls through to redraw.
+    IFS= read -r -s -n1 -t "$REFRESH" key
+    rc=$?
+    # rc=0: key pressed; rc>128: timeout (redraw); rc=1 with empty: stdin closed.
+    if [ $rc -gt 128 ]; then
+        continue
+    elif [ $rc -ne 0 ]; then
+        break
+    fi
     case "$key" in
         ' ') "$TTS_CTL" toggle ;;
         p)   "$TTS_CTL" pause  ;;

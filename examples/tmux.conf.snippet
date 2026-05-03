@@ -10,5 +10,5 @@
 
 bind T switch-client -T tts
 bind -T tts t     display-popup -E -w 95% -h 7 "~/.local/bin/tts-popup"
-bind -T tts Space display-popup -E -w 95% -h 3 "~/.local/bin/tts-ctl toggle"
-bind -T tts r     display-popup -E -w 95% -h 3 "~/.local/bin/tts-ctl replay"
+bind -T tts Space run-shell "~/.local/bin/tts-ctl toggle ; tmux display-message \"TTS $(~/.local/bin/tts-ctl status)\""
+bind -T tts r     run-shell "~/.local/bin/tts-ctl replay ; tmux display-message \"TTS replay\""
