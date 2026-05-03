@@ -11,7 +11,6 @@ via SCP, then plays it remotely. Two players are supported:
 
 Environment variables:
     RELAY_SSH_HOST              SSH alias for the target device (default: p8ar)
-    RELAY_SSH_DEST              Remote path prefix for audio files (default: .cache/relay-latest)
     RELAY_SSH_MAX_RETRIES       Retry count for SCP/play (default: 2)
     RELAY_SSH_PLAYBACK_WAIT     Max seconds to wait for current playback (default: 120)
     RELAY_TERMUX_PLAYER         `termux-media-player` or `mpv-ipc`. Unset =
@@ -59,7 +58,6 @@ class SshTermuxBackend(PlaybackBackend):
 
     def __init__(self, target: str | None = None) -> None:
         self.host = os.environ.get("RELAY_SSH_HOST", "p8ar")
-        self.dest = os.environ.get("RELAY_SSH_DEST", ".cache/relay-latest")
         self.max_retries = int(os.environ.get("RELAY_SSH_MAX_RETRIES", "2"))
         self.max_wait = int(os.environ.get("RELAY_SSH_PLAYBACK_WAIT", "120"))
         self.switch_cmd = os.environ.get("RELAY_TERMUX_SWITCH_CMD", "").strip()

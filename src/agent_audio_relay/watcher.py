@@ -20,7 +20,7 @@ Environment variables:
     RELAY_CONTROL_FILE      Control file (default: $XDG_RUNTIME_DIR/agent-audio-relay/backend,
                             falling back to /tmp/agent-audio-relay-backend-<uid>)
     RELAY_PROFILES_FILE     Alias map (default: ~/.config/agent-audio-relay/profiles.json)
-    RELAY_WATCH_DIRS        Colon-separated dirs to watch (default: /tmp/openclaw:/tmp)
+    RELAY_WATCH_DIRS        Colon-separated dirs to watch (default: ~/.cache/agent-audio-relay)
     RELAY_QUEUE_DIR         Local queue directory (default: per-user under
                             $XDG_RUNTIME_DIR/agent-audio-relay/queue, with
                             fallbacks to $XDG_STATE_HOME or $TMPDIR/-<uid>)
@@ -58,8 +58,14 @@ from .backends.registry import (
     resolve_selector,
 )
 
-_TMP = os.environ.get("TMPDIR", "/tmp")
-WATCH_DIRS = os.environ.get("RELAY_WATCH_DIRS", f"{_TMP}/openclaw:{_TMP}").split(":")
+# Match the systemd template default. The previous "$TMPDIR/openclaw:$TMPDIR"
+# was a relic from a single-host setup where hooks dropped directly to /tmp;
+# in the current forwarder→player topology, clips arrive in
+# ~/.cache/agent-audio-relay/ via scp, so that's the sensible default.
+WATCH_DIRS = os.environ.get(
+    "RELAY_WATCH_DIRS",
+    str(Path.home() / ".cache" / "agent-audio-relay"),
+).split(":")
 
 
 def _per_user_state_root() -> Path:
