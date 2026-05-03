@@ -237,6 +237,10 @@ case "${1:-}" in
             if [ -n "$_target" ]; then
                 mpv_cmd "{\"command\":[\"loadfile\",\"$_target\",\"replace\"]}" >/dev/null
                 mpv_cmd '{"command":["set_property","pause",false]}'            >/dev/null
+                # If the new target is the same file mpv just hit EOF on,
+                # `loadfile replace` can be a quiet no-op on some mpv
+                # configurations — explicit seek 0 forces start-from-zero.
+                mpv_cmd '{"command":["seek",0,"absolute"]}'                     >/dev/null
             elif [ -n "$_cur" ]; then
                 # No clip found for this session, but mpv has something loaded —
                 # cycle pause on it so Space still gives audible feedback rather
@@ -254,6 +258,10 @@ case "${1:-}" in
         if target=$(replay_target "${2:-}") && [ -n "$target" ]; then
             mpv_cmd "{\"command\":[\"loadfile\",\"$target\",\"replace\"]}" >/dev/null
             mpv_cmd '{"command":["set_property","pause",false]}'           >/dev/null
+            # See comment in `toggle`: explicit seek 0 ensures we always
+            # start from the beginning even when mpv was at EOF on the
+            # same file we just loaded.
+            mpv_cmd '{"command":["seek",0,"absolute"]}'                    >/dev/null
         fi
         # else: no clip for this session — silent no-op, popup surfaces it.
         ;;

@@ -29,6 +29,30 @@ TTS_CTL="${TTS_CTL:-tts-ctl}"
 # in _cleanup on EXIT.
 printf '\033[?25l'
 
+# Help text for the `?` hotkey. Written to a tempfile at startup so the
+# `?` binding can `cat` it inside a nested tmux popup without inline
+# heredoc quoting hell. Cleaned up in _cleanup.
+HELP_FILE=$(mktemp -t tts-popup-help.XXXXXX)
+cat > "$HELP_FILE" <<'EOF'
+ TTS popup hotkeys
+ ─────────────────
+   Space    play/pause; replay if clip
+            ended or different session
+            is loaded
+   r        replay latest for session
+   0        seek to start (no reload)
+   h / l    seek -5s / +5s
+   H / L    seek -30s / +30s
+   - / =    volume -5 / +5
+   m        toggle mute
+   ?        this help
+   q / Esc  close popup
+
+ Status bar shows live progress.
+
+ press any key to dismiss
+EOF
+
 # Pin the popup to a specific tmux session so toggle/replay always target
 # this session's clip — never the global `latest` symlink, which on a shared
 # phone archive may point at some other host's session. The tmux binding
@@ -274,7 +298,7 @@ _cleanup() {
     # cursor blink showing as flicker).
     printf '\033[?25h'
     kill "$FETCH_PID" 2>/dev/null
-    rm -f "$STATE_FILE" "$STATE_FILE.tmp"
+    rm -f "$STATE_FILE" "$STATE_FILE.tmp" "$HELP_FILE"
     if [ -n "$_CTL_PATH" ] && [ -S "$_CTL_PATH" ]; then
         ssh -O exit -o ControlPath="$_CTL_PATH" "$_PHONE_HOST" 2>/dev/null
     fi
@@ -329,6 +353,14 @@ while true; do
         '-') "$TTS_CTL" volume -5 >/dev/null 2>&1 & disown ;;
         '=') "$TTS_CTL" volume 5  >/dev/null 2>&1 & disown ;;
         m)   "$TTS_CTL" mute     >/dev/null 2>&1 & disown ;;
+        '?')
+            # Nested popup with the help text. Blocks until any key
+            # (the `read -n1 -s` at the end), then control returns to
+            # the main popup, which redraws its tiny one-liner.
+            tmux display-popup -E -w 44 -h 18 -x R -y 2 \
+                "cat \"$HELP_FILE\"; read -n1 -s" 2>/dev/null
+            _LAST_FRAME=""  # force redraw on return
+            ;;
         q|$'\e') exit 0 ;;
         *)   continue ;;
     esac
