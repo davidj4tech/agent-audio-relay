@@ -27,13 +27,24 @@ slug() {
     printf '%s' "$1" | tr -c 'A-Za-z0-9-' '-' | sed 's/-\+/-/g; s/^-//; s/-$//'
 }
 
+# Default ssh flags. Timeouts matter most when the phone is asleep —
+# without them, the connection sits open and any backgrounded command
+# (e.g. popup's `tts-ctl toggle &`) just queues forever, then fires
+# minutes later when the next clip emit wakes Tailscale. Fail fast
+# instead so the user sees nothing happen and can retry rather than
+# getting a delayed replay.
+#   ConnectTimeout=5            — initial dial-up budget
+#   ServerAliveInterval=3       — keepalive every 3s on active conn
+#   ServerAliveCountMax=2       — drop after 2 missed keepalives (~6s)
+TTS_SSH_DEFAULTS="-o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=3 -o ServerAliveCountMax=2"
+
 mpv_cmd() {
     local json="$1"
     if [ -S "$SOCK" ]; then
         printf '%s\n' "$json" | socat - "UNIX-CONNECT:$SOCK" 2>/dev/null
     else
         # shellcheck disable=SC2029,SC2086
-        ssh -o BatchMode=yes ${CLAUDE_TTS_SSH_OPTS:-} "$PHONE_HOST" \
+        ssh ${TTS_SSH_DEFAULTS} ${CLAUDE_TTS_SSH_OPTS:-} "$PHONE_HOST" \
             "printf '%s\n' $(printf '%q' "$json") | socat - 'UNIX-CONNECT:$SOCK'" \
             2>/dev/null
     fi
@@ -57,7 +68,7 @@ mpv_batch_get() {
         raw=$(printf '%s' "$cmds" | socat - "UNIX-CONNECT:$SOCK" 2>/dev/null)
     else
         # shellcheck disable=SC2029,SC2086
-        raw=$(ssh -o BatchMode=yes ${CLAUDE_TTS_SSH_OPTS:-} "$PHONE_HOST" \
+        raw=$(ssh ${TTS_SSH_DEFAULTS} ${CLAUDE_TTS_SSH_OPTS:-} "$PHONE_HOST" \
             "printf '%s' $(printf '%q' "$cmds") | socat - 'UNIX-CONNECT:$SOCK'" \
             2>/dev/null)
     fi
@@ -141,7 +152,7 @@ replay_target() {
         # Force bash on the remote so unmatched globs in the fallback don't
         # abort under zsh's default NOMATCH (Termux user shell is often zsh).
         # shellcheck disable=SC2086
-        probe=$(ssh -o BatchMode=yes ${CLAUDE_TTS_SSH_OPTS:-} "$PHONE_HOST" \
+        probe=$(ssh ${TTS_SSH_DEFAULTS} ${CLAUDE_TTS_SSH_OPTS:-} "$PHONE_HOST" \
             "bash -c $(printf '%q' "$probe_script")" 2>/dev/null)
         [ -n "$probe" ] && { printf '%s' "$probe"; return; }
     fi
