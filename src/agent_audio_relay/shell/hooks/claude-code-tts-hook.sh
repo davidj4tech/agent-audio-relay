@@ -19,7 +19,7 @@
 [ "${CLAUDE_TTS_ENABLED:-1}" = "0" ] && exit 0
 
 DROP_DIR="${CLAUDE_TTS_DROP_DIR:-/tmp/tts-claude}"
-STAMP_DIR="${CLAUDE_TTS_STAMP_DIR:-${TMPDIR:-/tmp}}"
+STAMP_DIR="${CLAUDE_TTS_STAMP_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/agent-audio-relay}"
 mkdir -p "$STAMP_DIR" 2>/dev/null || true
 
 TTS_DROP="${RELAY_TTS_DROP_BIN:-$(dirname "$0")/../bin/tts-drop}"
