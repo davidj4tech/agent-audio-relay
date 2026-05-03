@@ -24,5 +24,11 @@ bind T switch-client -T tts
 bind -T tts t     set-environment -g TTS_POPUP_SESSION "#{session_name}" \; display-popup -E -w 22 -h 3 -x R -y 0 "~/.local/bin/tts-popup"
 # Shortcut: M-t (Alt-t) opens the same popup with no prefix at all.
 bind -n M-t       set-environment -g TTS_POPUP_SESSION "#{session_name}" \; display-popup -E -w 22 -h 3 -x R -y 0 "~/.local/bin/tts-popup"
+
+# Mouse wheel anywhere on the status bar adjusts mpv volume. Requires
+# `set -g mouse on` (oh-my-tmux defaults to on). Affects the whole
+# status bar — scrolling on any segment changes TTS volume.
+bind -n WheelUpStatus   run-shell "~/.local/bin/tts-ctl volume 5"
+bind -n WheelDownStatus run-shell "~/.local/bin/tts-ctl volume -5"
 bind -T tts Space run-shell "~/.local/bin/tts-ctl toggle '#{session_name}'"
 bind -T tts r     run-shell "~/.local/bin/tts-ctl replay '#{session_name}'"

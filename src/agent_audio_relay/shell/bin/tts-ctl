@@ -272,6 +272,54 @@ case "${1:-}" in
     slower)  mpv_cmd '{"command":["multiply","speed",0.9091]}'         >/dev/null ;;
     faster)  mpv_cmd '{"command":["multiply","speed",1.1]}'            >/dev/null ;;
     speed)   mpv_cmd "{\"command\":[\"set_property\",\"speed\",${2:-1}]}" >/dev/null ;;
+    prev|next)
+        # Walk the session's archive by mtime. Find the currently-loaded
+        # clip's position, jump to the older (prev) or newer (next) one.
+        direction="$1"
+        sess="${2:-}"
+        if [ -z "$sess" ] && [ -n "${TMUX_PANE:-}" ]; then
+            sess=$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)
+        fi
+        [ -z "$sess" ] && exit 1
+        sslug=$(slug "$sess")
+        cur=$(mpv_get path)
+        cur_base="${cur##*/}"
+        # Resolve symlinks (mpv may report `latest--<...>.mp3`) to a real
+        # archive filename so we can locate it in the mtime-sorted list.
+        if [ -d "$ARCHIVE_DIR" ]; then
+            [ -L "$cur" ] && cur_base=$(basename "$(readlink -f "$cur")")
+            files=$(ls -tr "$ARCHIVE_DIR"/*--"${sslug}"__*.{wav,mp3,opus,ogg} 2>/dev/null)
+        else
+            # shellcheck disable=SC2086
+            files=$(ssh ${TTS_SSH_DEFAULTS} ${CLAUDE_TTS_SSH_OPTS:-} "$PHONE_HOST" \
+                "bash -c 'set +o nullglob; for ext in wav mp3 opus ogg; do for f in $ARCHIVE_DIR/*--${sslug}__*.\$ext; do [ -e \"\$f\" ] && stat -c \"%Y \$f\" \"\$f\" 2>/dev/null; done; done | sort -n | cut -d\" \" -f2-; readlink -f $cur 2>/dev/null'" 2>/dev/null)
+            # Last line of output is the readlink-resolved current path.
+            resolved=$(printf '%s\n' "$files" | tail -n1)
+            files=$(printf '%s\n' "$files" | sed '$d')
+            [ -n "$resolved" ] && cur_base="${resolved##*/}"
+        fi
+        target=""
+        found=0
+        while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            base="${f##*/}"
+            case "$direction" in
+                prev)
+                    [ "$base" = "$cur_base" ] && break
+                    target="$f"
+                    ;;
+                next)
+                    if [ "$found" = "1" ]; then target="$f"; break; fi
+                    [ "$base" = "$cur_base" ] && found=1
+                    ;;
+            esac
+        done <<< "$files"
+        if [ -n "$target" ]; then
+            mpv_cmd "{\"command\":[\"loadfile\",\"$target\",\"replace\"]}" >/dev/null
+            mpv_cmd '{"command":["set_property","pause",false]}'           >/dev/null
+            mpv_cmd '{"command":["seek",0,"absolute"]}'                    >/dev/null
+        fi
+        ;;
     status)
         # One IPC round-trip for all five properties.
         mapfile -t _vals < <(mpv_batch_get pause idle-active time-pos duration volume)

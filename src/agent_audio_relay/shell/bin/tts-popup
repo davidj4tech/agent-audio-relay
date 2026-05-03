@@ -17,6 +17,8 @@
 #   - / =   volume -5 / +5
 #   m       toggle mute
 #   [ / ]   slower / faster (speed × 1/1.1 / × 1.1)
+#   < / >   previous / next clip in this session's archive
+#   Del/BS  reset speed to 1.0
 #   ?       show keymap in tmux status line
 #   q / Esc close
 #
@@ -346,6 +348,24 @@ while true; do
     elif [ $rc -ne 0 ]; then
         break
     fi
+    # Multi-byte sequence detection. Arrow keys, Delete, Home, End all
+    # arrive as ESC-prefixed sequences (e.g. Delete = ESC[3~). Read any
+    # remaining bytes with a tiny timeout — bare Esc → quit, sequence →
+    # remap to a synthetic name we can dispatch in the case below.
+    if [ "$key" = $'\e' ]; then
+        IFS= read -r -s -t 0.05 escseq
+        case "$escseq" in
+            '')         key=$'\e' ;;          # bare escape — quit
+            '[3~')      key='DELETE' ;;
+            '[A')       key='UP' ;;
+            '[B')       key='DOWN' ;;
+            '[C')       key='RIGHT' ;;
+            '[D')       key='LEFT' ;;
+            '[H'|'OH')  key='HOME' ;;
+            '[F'|'OF')  key='END' ;;
+            *)          key='' ;;             # unknown sequence
+        esac
+    fi
     # All actions fire in the background so the keypress loop never blocks
     # on an ssh RTT. The next periodic fetch (or the explicit refetch below)
     # picks up the resulting state change.
@@ -364,6 +384,11 @@ while true; do
         m)   "$TTS_CTL" mute     >/dev/null 2>&1 & disown ;;
         '[') "$TTS_CTL" slower   >/dev/null 2>&1 & disown ;;
         ']') "$TTS_CTL" faster   >/dev/null 2>&1 & disown ;;
+        '<') "$TTS_CTL" prev "$SESSION" >/dev/null 2>&1 & disown
+             LOAD_PENDING_SINCE=$SECONDS ;;
+        '>') "$TTS_CTL" next "$SESSION" >/dev/null 2>&1 & disown
+             LOAD_PENDING_SINCE=$SECONDS ;;
+        DELETE|$'\b'|$'\x7f') "$TTS_CTL" speed 1 >/dev/null 2>&1 & disown ;;
         '?')
             # Help via tmux's display-message. Nested display-popup from
             # inside an existing popup gets refused/killed instantly on at
@@ -372,8 +397,8 @@ while true; do
             # message shows in the status area without nesting and with no
             # geometry constraints. -d 0 means "stay until cleared by next
             # status update" (which happens within status-interval).
-            tmux display-message -d 7000 \
-                "tts: Space=togl r=replay 0=start h/l=±5s H/L=±30s -/=vol m=mute [/]=speed q=quit" \
+            tmux display-message -d 8000 \
+                "tts: Space=togl r=replay 0=start h/l=±5s H/L=±30s -/=vol m=mute [/]=speed </>=prev/next Del=spd1 q=quit" \
                 2>/dev/null
             ;;
         q|$'\e') exit 0 ;;
