@@ -89,13 +89,11 @@ replay_target() {
         hslug=$(host_slug)
         [ -n "$hslug" ] && candidates+=("$ARCHIVE_DIR/latest--$hslug--$sslug")
         candidates+=("$ARCHIVE_DIR/latest--$sslug")
-    else
-        # Only fall back to the global `latest` symlink when no session
-        # was given at all — never as a session-mismatch fallback (that
-        # would replay clips from other hosts/sessions, which is the bug
-        # session-pinning was added to fix).
-        candidates+=("$ARCHIVE_DIR/latest")
     fi
+    # No global `latest` fallback by design — replaying a clip from another
+    # host/session is the bug session-pinning was added to fix. With no
+    # session and no candidates, the synthetic path below makes mpv error
+    # out visibly rather than silently misroute.
     # Prefer a remote-existing match; mpv loadfile of a missing path is
     # a silent no-op, which is worse UX than picking *something* and
     # letting mpv error out visibly.
