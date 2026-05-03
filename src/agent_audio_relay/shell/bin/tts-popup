@@ -177,6 +177,18 @@ bar() {
 # auto-close timer without a second IPC round-trip.
 IDLE=
 _LAST_FRAME=""
+# Visual feedback for the last key pressed. Shown as `[<label>]`
+# appended to the popup body for up to KEY_FEEDBACK_US microseconds,
+# then cleared. Bash 5's $EPOCHREALTIME gives us microsecond precision
+# without forking date.
+LAST_KEY=""
+LAST_KEY_AT=0
+KEY_FEEDBACK_US=700000  # 0.7 seconds
+
+# now_us — microseconds since epoch as an integer. EPOCHREALTIME is
+# "<sec>.<usec>"; stripping the dot gives us a usable unsigned integer.
+_now_us() { printf '%s' "${EPOCHREALTIME/./}"; }
+
 draw() {
     # Build the full frame in a buffer and write atomically below.
     local paused idle pos dur vol path mute state cols barw
@@ -238,6 +250,18 @@ draw() {
     fi
     local mute_suffix=""
     [ "$mute" = "true" ] && mute_suffix=' [M]'
+    # Briefly show the last keypress for visual feedback. Cleared once
+    # KEY_FEEDBACK_US has elapsed since the press; subsequent draws
+    # then fall back to the plain `state label mute` body.
+    local key_suffix=""
+    if [ -n "$LAST_KEY" ]; then
+        local age=$(( $(_now_us) - LAST_KEY_AT ))
+        if [ "$age" -lt "$KEY_FEEDBACK_US" ]; then
+            key_suffix=" [${LAST_KEY}]"
+        else
+            LAST_KEY=""
+        fi
+    fi
     # Build the whole frame in one buffer and emit with a single printf.
     # tmux's popup renderer applies the entire write atomically, so the
     # user never sees the bar half-drawn or the label arrive before the
@@ -247,7 +271,7 @@ draw() {
     # One-line layout. \033[K erases any prior-frame residue; \033[J
     # below wipes anything that was drawn on lines 2+ by an older popup.
     local frame=$'\033[H'
-    frame+="${state} ${label}${mute_suffix}"
+    frame+="${state} ${label}${mute_suffix}${key_suffix}"
     frame+=$'\033[K\033[J'
     # Only emit if the rendered output changed. Bar cells only cross a
     # boundary every ~(duration/width) seconds, but draw() runs every
@@ -368,28 +392,30 @@ while true; do
     fi
     # All actions fire in the background so the keypress loop never blocks
     # on an ssh RTT. The next periodic fetch (or the explicit refetch below)
-    # picks up the resulting state change.
+    # picks up the resulting state change. We also set LAST_KEY so the
+    # next draw can show a brief "you pressed X" indicator.
     case "$key" in
         ' ') "$TTS_CTL" toggle "$SESSION" >/dev/null 2>&1 & disown
-             LOAD_PENDING_SINCE=$SECONDS ;;
+             LOAD_PENDING_SINCE=$SECONDS; LAST_KEY="space" ;;
         r)   "$TTS_CTL" replay "$SESSION" >/dev/null 2>&1 & disown
-             LOAD_PENDING_SINCE=$SECONDS ;;
-        0)   "$TTS_CTL" start    >/dev/null 2>&1 & disown ;;
-        h)   "$TTS_CTL" seek -5  >/dev/null 2>&1 & disown ;;
-        l)   "$TTS_CTL" seek 5   >/dev/null 2>&1 & disown ;;
-        H)   "$TTS_CTL" seek -30 >/dev/null 2>&1 & disown ;;
-        L)   "$TTS_CTL" seek 30  >/dev/null 2>&1 & disown ;;
-        '-') "$TTS_CTL" volume -5 >/dev/null 2>&1 & disown ;;
-        '=') "$TTS_CTL" volume 5  >/dev/null 2>&1 & disown ;;
-        m)   "$TTS_CTL" mute     >/dev/null 2>&1 & disown ;;
-        '[') "$TTS_CTL" slower   >/dev/null 2>&1 & disown ;;
-        ']') "$TTS_CTL" faster   >/dev/null 2>&1 & disown ;;
+             LOAD_PENDING_SINCE=$SECONDS; LAST_KEY="replay" ;;
+        0)   "$TTS_CTL" start    >/dev/null 2>&1 & disown; LAST_KEY="start" ;;
+        h)   "$TTS_CTL" seek -5  >/dev/null 2>&1 & disown; LAST_KEY="-5s" ;;
+        l)   "$TTS_CTL" seek 5   >/dev/null 2>&1 & disown; LAST_KEY="+5s" ;;
+        H)   "$TTS_CTL" seek -30 >/dev/null 2>&1 & disown; LAST_KEY="-30s" ;;
+        L)   "$TTS_CTL" seek 30  >/dev/null 2>&1 & disown; LAST_KEY="+30s" ;;
+        '-') "$TTS_CTL" volume -5 >/dev/null 2>&1 & disown; LAST_KEY="vol-" ;;
+        '=') "$TTS_CTL" volume 5  >/dev/null 2>&1 & disown; LAST_KEY="vol+" ;;
+        m)   "$TTS_CTL" mute     >/dev/null 2>&1 & disown; LAST_KEY="mute" ;;
+        '[') "$TTS_CTL" slower   >/dev/null 2>&1 & disown; LAST_KEY="slower" ;;
+        ']') "$TTS_CTL" faster   >/dev/null 2>&1 & disown; LAST_KEY="faster" ;;
         '<') "$TTS_CTL" prev "$SESSION" >/dev/null 2>&1 & disown
-             LOAD_PENDING_SINCE=$SECONDS ;;
+             LOAD_PENDING_SINCE=$SECONDS; LAST_KEY="prev" ;;
         '>') "$TTS_CTL" next "$SESSION" >/dev/null 2>&1 & disown
-             LOAD_PENDING_SINCE=$SECONDS ;;
-        DELETE|$'\b'|$'\x7f') "$TTS_CTL" speed 1 >/dev/null 2>&1 & disown ;;
+             LOAD_PENDING_SINCE=$SECONDS; LAST_KEY="next" ;;
+        DELETE|$'\b'|$'\x7f') "$TTS_CTL" speed 1 >/dev/null 2>&1 & disown; LAST_KEY="speed=1" ;;
         '?')
+            LAST_KEY="help"
             # Help via tmux's display-message. Nested display-popup from
             # inside an existing popup gets refused/killed instantly on at
             # least some tmux versions (we logged display-popup exit=0
@@ -404,6 +430,9 @@ while true; do
         q|$'\e') exit 0 ;;
         *)   continue ;;
     esac
+    # Stamp the keypress feedback timestamp once per dispatch so the next
+    # draw can show LAST_KEY for KEY_FEEDBACK_US microseconds.
+    LAST_KEY_AT=$(_now_us)
     # Kick an out-of-band refetch ~$REFRESH seconds before the next periodic
     # one would fire, so the visible state updates promptly after an action
     # lands on mpv (~700ms RTT after backgrounded action started).
