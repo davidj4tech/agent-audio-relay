@@ -24,6 +24,9 @@ bind T switch-client -T tts
 bind -T tts t     set-environment -g TTS_POPUP_SESSION "#{session_name}" \; display-popup -E -w 22 -h 3 -x R -y 0 "~/.local/bin/tts-popup"
 # Shortcut: M-t (Alt-t) opens the same popup with no prefix at all.
 bind -n M-t       set-environment -g TTS_POPUP_SESSION "#{session_name}" \; display-popup -E -w 22 -h 3 -x R -y 0 "~/.local/bin/tts-popup"
+# M-Space (Alt-Space) toggles play/pause directly (à la spotify-tui's F8).
+# No popup, no prefix — fastest possible interaction.
+bind -n M-Space   run-shell "~/.local/bin/tts-ctl toggle '#{session_name}'"
 
 # Mouse wheel anywhere on the status bar adjusts mpv volume. Requires
 # `set -g mouse on` (oh-my-tmux defaults to on). Affects the whole

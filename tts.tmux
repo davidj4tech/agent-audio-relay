@@ -35,6 +35,7 @@ opt() {
 
 PREFIX_KEY=$(opt @tts-prefix-key      T)
 POPUP_KEY=$( opt @tts-popup-key       M-t)
+TOGGLE_KEY=$(opt @tts-toggle-key      M-Space)
 POPUP_W=$(   opt @tts-popup-width     22)
 POPUP_H=$(   opt @tts-popup-height    3)
 POPUP_X=$(   opt @tts-popup-x         R)
@@ -61,6 +62,10 @@ tmux bind -n "$POPUP_KEY" \
     set-environment -g TTS_POPUP_SESSION '#{session_name}' \\\; \
     display-popup -E -w "$POPUP_W" -h "$POPUP_H" -x "$POPUP_X" -y "$POPUP_Y" \
     'tts-popup'
+
+# Direct toggle without opening the popup (fastest path).
+tmux bind -n "$TOGGLE_KEY" \
+    run-shell "tts-ctl toggle '#{session_name}'"
 tmux bind -T tts Space run-shell "tts-ctl toggle '#{session_name}'"
 tmux bind -T tts r     run-shell "tts-ctl replay '#{session_name}'"
 

@@ -584,6 +584,7 @@ set -g @plugin 'davidj4tech/agent-audio-relay'
 # Optional overrides — defaults shown:
 # set -g @tts-prefix-key      T
 # set -g @tts-popup-key       M-t       # no-prefix shortcut for the popup
+# set -g @tts-toggle-key      M-Space   # no-prefix one-keystroke play/pause
 # set -g @tts-popup-width     22
 # set -g @tts-popup-height    3
 # set -g @tts-popup-x         R

@@ -13,42 +13,29 @@
 #     set -g status-interval 1
 #     set -g status-right '#(tts-status-line) #[fg=default] %H:%M  %d-%b'
 #
-# `status-interval 1` makes tmux re-run the command every second so the
-# bar progresses smoothly. Each invocation is one IPC round-trip via
-# the aar-mpv-tunnel (~110ms over Tailscale; fast enough for 1s
-# refresh). If tmux's blocking on slow `#()` invocations becomes a
-# problem, run a separate cache daemon and `cat` from there.
+# Stale-while-revalidate cache: tmux calls this every status-interval
+# seconds and may run multiple clients concurrently. We back results
+# with a file cache (TTL 1s while playing, 5s while idle) and revalidate
+# in a background subshell so cache misses don't block tmux's redraw.
 #
 # Env:
-#   TTS_STATUS_BAR_WIDTH   Width of the █░ progress bar (default: 12)
-#   TTS_CTL                Path to tts-ctl (default: tts-ctl from PATH)
-#   TTS_STATUS_HIDE_IDLE   If "0", emit "○" even when idle (default: "1")
+#   TTS_STATUS_BAR_WIDTH    Width of the █░ progress bar (default: 12)
+#   TTS_STATUS_HIDE_IDLE    "0" → emit "○" instead of empty when idle (default: "1")
+#   TTS_STATUS_TTL_PLAYING  Cache lifetime while a clip is loaded (default: 1s)
+#   TTS_STATUS_TTL_IDLE     Cache lifetime while idle (default: 5s)
+#   TTS_CTL                 Path to tts-ctl (default: tts-ctl from PATH)
 
 set -u
 TTS_CTL="${TTS_CTL:-tts-ctl}"
 BAR_WIDTH="${TTS_STATUS_BAR_WIDTH:-12}"
 HIDE_IDLE="${TTS_STATUS_HIDE_IDLE:-1}"
+TTL_PLAYING="${TTS_STATUS_TTL_PLAYING:-1}"
+TTL_IDLE="${TTS_STATUS_TTL_IDLE:-5}"
 
-mapfile -t v < <("$TTS_CTL" get pause idle-active time-pos duration mute 2>/dev/null)
-paused="${v[0]:-}"
-idle="${v[1]:-}"
-pos="${v[2]:-}"
-dur="${v[3]:-}"
-mute="${v[4]:-}"
-
-# Idle / no-state: emit nothing by default so the surrounding status-right
-# content (clock, etc.) shows through unchanged.
-if [ "$idle" = "true" ] || [ -z "$paused" ]; then
-    [ "$HIDE_IDLE" = "1" ] && exit 0
-    printf '○'
-    exit 0
-fi
-
-if [ "$paused" = "true" ]; then
-    state='⏸'
-else
-    state='▶'
-fi
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/agent-audio-relay"
+CACHE_FILE="$CACHE_DIR/status-line.cache"
+LOCK_FILE="$CACHE_FILE.lock"
+mkdir -p "$CACHE_DIR" 2>/dev/null
 
 fmt_time() {
     local t="$1"
@@ -81,12 +68,78 @@ bar() {
     printf '%s%s' "$fill" "$rest"
 }
 
-mute_suffix=""
-[ "$mute" = "true" ] && mute_suffix=' [M]'
+# Format the current mpv state as one status-line string. Empty output
+# when idle (or "○" when HIDE_IDLE=0). Side-effect free.
+render() {
+    local v paused idle pos dur mute state mute_suffix
+    mapfile -t v < <("$TTS_CTL" get pause idle-active time-pos duration mute 2>/dev/null)
+    paused="${v[0]:-}"
+    idle="${v[1]:-}"
+    pos="${v[2]:-}"
+    dur="${v[3]:-}"
+    mute="${v[4]:-}"
 
-printf '%s %s %s %s%s' \
-    "$state" \
-    "$(fmt_time "$pos")" \
-    "$(bar "$pos" "$dur" "$BAR_WIDTH")" \
-    "$(fmt_time "$dur")" \
-    "$mute_suffix"
+    if [ "$idle" = "true" ] || [ -z "$paused" ]; then
+        [ "$HIDE_IDLE" = "1" ] && return 0
+        printf '○'
+        return 0
+    fi
+
+    if [ "$paused" = "true" ]; then
+        state='⏸'
+    else
+        state='▶'
+    fi
+    mute_suffix=""
+    [ "$mute" = "true" ] && mute_suffix=' [M]'
+    printf '%s %s %s %s%s' \
+        "$state" \
+        "$(fmt_time "$pos")" \
+        "$(bar "$pos" "$dur" "$BAR_WIDTH")" \
+        "$(fmt_time "$dur")" \
+        "$mute_suffix"
+}
+
+# Refresh the cache file. flock prevents pile-ups when many tmux
+# clients invoke us concurrently; -n exits cleanly if another refresh
+# is already in flight.
+refresh_cache() {
+    (
+        flock -n 9 || exit 0
+        local out
+        out=$(render) || exit 1
+        printf '%s' "$out" > "$CACHE_FILE.tmp" 2>/dev/null \
+            && mv -f "$CACHE_FILE.tmp" "$CACHE_FILE" 2>/dev/null
+    ) 9>"$LOCK_FILE"
+}
+
+# State-aware TTL: an empty cache file means the last refresh saw mpv
+# idle, so use the longer idle TTL. A non-empty cache (= playing or
+# paused) gets the short TTL for smooth bar updates.
+if [ -f "$CACHE_FILE" ] && [ ! -s "$CACHE_FILE" ]; then
+    ttl="$TTL_IDLE"
+else
+    ttl="$TTL_PLAYING"
+fi
+
+# Serve cache if fresh.
+if [ -f "$CACHE_FILE" ]; then
+    mtime=$(stat -c %Y "$CACHE_FILE" 2>/dev/null || echo 0)
+    age=$(( $(date +%s) - mtime ))
+    if [ "$age" -lt "$ttl" ]; then
+        cat "$CACHE_FILE"
+        exit 0
+    fi
+    # Stale-while-revalidate: emit cached value (may be empty) immediately,
+    # refresh in background so the next call sees fresh data.
+    cat "$CACHE_FILE"
+    refresh_cache &
+    disown 2>/dev/null
+    exit 0
+fi
+
+# First-ever invocation — no cache file yet. Synchronous fetch.
+out=$(render)
+printf '%s' "$out"
+printf '%s' "$out" > "$CACHE_FILE.tmp" 2>/dev/null \
+    && mv -f "$CACHE_FILE.tmp" "$CACHE_FILE" 2>/dev/null
