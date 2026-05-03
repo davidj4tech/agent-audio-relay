@@ -61,11 +61,15 @@ sender runs `agent-audio-relay-forwarder.sh`, which inotify-watches its
 local `/tmp/tts-*` drop dirs and `scp`s each new clip to the player's
 `~/.cache/agent-audio-relay/<src_dir>/`. The player runs
 `agent-audio-relay` with `RELAY_BACKEND=mpv`, watching that same
-directory. Only one daemon ever issues `loadfile`.
+directory and archiving played clips into
+`~/.local/state/agent-audio-relay/`. Only one daemon ever issues
+`loadfile`. This is the recommended setup.
 
 The older alternative — running `agent-audio-relay` on the sender with
 `RELAY_BACKEND=ssh-termux` to push directly into a remote mpv socket —
-still works for small setups, but skip it if you also want the
+still works for small setups (and now writes archives to the same
+`~/.local/state/agent-audio-relay/` location so `tts-ctl` resolves
+session-scoped replay identically). Skip it if you also want the
 multi-channel ducking that requires mpv-mcp on the player side.
 
 ## Watcher daemon (core)
@@ -78,9 +82,13 @@ Back-to-back messages are sequenced — it waits for current playback to
 finish before starting the next.
 
 Hooks name their clips with a denote-style stem
-(`YYYYMMDDTHHMMSS--<session>__<persona>_<agent>_<kind>.<ext>`) via the
-shared `hooks/lib/denote-stem.sh` helper, and the watcher preserves the
-original stem end-to-end so backends can archive and replay by identity.
+(`YYYYMMDDTHHMMSS--<host>--<session>__<persona>_<agent>_<kind>.<ext>`)
+via the shared `hooks/lib/denote-stem.sh` helper, and the watcher
+preserves the original stem end-to-end so backends can archive and
+replay by identity. The `<host>` segment is the *producing* machine's
+short hostname — encoded by the producer rather than re-derived at
+archive time, so multi-host setups don't collide on `latest--<session>`
+when two hosts happen to use the same tmux session name.
 
 **Requirements:** `inotify-tools`, `ffmpeg` (for silence padding).
 
@@ -93,7 +101,7 @@ agent-audio-relay
 | `RELAY_BACKEND` | `ssh-termux` | Default selector — bare backend or `backend:target` |
 | `RELAY_CONTROL_FILE` | `$XDG_RUNTIME_DIR/agent-audio-relay/backend` (fallback `/tmp/agent-audio-relay-backend-<uid>`) | Control file used by `switch` |
 | `RELAY_PROFILES_FILE` | `~/.config/agent-audio-relay/profiles.json` | Alias map |
-| `RELAY_WATCH_DIRS` | `/tmp/openclaw:/tmp` | Colon-separated dirs to watch |
+| `RELAY_WATCH_DIRS` | `~/.cache/agent-audio-relay` | Colon-separated dirs to watch |
 | `RELAY_QUEUE_DIR` | `/tmp/agent-audio-relay-queue` | Local queue directory (set to `$XDG_RUNTIME_DIR/agent-audio-relay-queue` under systemd to avoid cross-user `/tmp` collisions — see the shipped unit) |
 | `RELAY_PAD_SILENCE` | `1` | Pad 1s silence onto audio (`1` or `0`) |
 
@@ -178,14 +186,19 @@ exit, and `BT:SKIPPED (no RELAY_TERMUX_SWITCH_CMD configured)` when a
 target was selected but no command is set — in which case playback still
 goes to whichever device Android currently considers active.
 
-Clips are archived on the phone under `~/.cache/agent-audio/<stem>.<ext>`.
-The backend maintains three symlinks per clip:
+Clips are archived on the phone under
+`~/.local/state/agent-audio-relay/<stem>.<ext>` (same location the `mpv`
+backend uses, so `tts-ctl` reads one canonical archive regardless of
+which backend produced the clip). Per-clip symlinks:
 
 - `latest.<ext>` — global most-recent
-- `latest--<session>.<ext>` — most-recent from a given session
+- `latest--<host>--<session>.<ext>` — most-recent from a given host+session
+- `latest--<session>.<ext>` — most-recent from a given session (any host)
 - `latest--<session>__<agent>.<ext>` — session + agent scoped
 
-`bin/tts-ctl` uses those symlinks to implement session-aware replay.
+`bin/tts-ctl` uses those symlinks to implement session-aware replay,
+preferring the host-prefixed pointer first so cross-host session-name
+collisions don't pick up another machine's clip.
 
 #### SSH setup for Termux
 
@@ -488,14 +501,17 @@ tunnels over `ssh $CLAUDE_TTS_PHONE_HOST` (default `p8ar`).
 ```sh
 tts-ctl pause            # pause current playback
 tts-ctl resume           # resume
-tts-ctl toggle           # pause/resume depending on state
-tts-ctl replay           # replay latest from the current tmux session
-                         #   (falls back to global latest)
-tts-ctl replay foo       # replay latest from session "foo"
+tts-ctl toggle           # cycle pause if the right clip is loaded;
+                         #   reload the session's latest if it isn't
+tts-ctl replay [session] # reload+play this session's latest clip
+                         #   (no global fallback — session is honored)
 tts-ctl seek 5           # relative seek (negative = backwards)
+tts-ctl start            # seek to 0 (replay current clip from start)
 tts-ctl volume -5        # add to mpv volume
+tts-ctl mute             # toggle mute
 tts-ctl status           # state + position/duration + volume
 tts-ctl nowplaying       # current file path
+tts-ctl get PROP...      # one IPC round-trip; one line per property
 ```
 
 Required on the phone: `mpv`, `socat`, `jq`, and an mpv daemon launched
@@ -518,14 +534,22 @@ inside `tmux display-popup -E`. Drop these bindings into
 
 ```tmux
 bind T switch-client -T tts
-bind -T tts t     display-popup -E -w 95% -h 7 "~/.local/bin/tts-popup"
-bind -T tts Space display-popup -E -w 95% -h 3 "~/.local/bin/tts-ctl toggle"
-bind -T tts r     display-popup -E -w 95% -h 3 "~/.local/bin/tts-ctl replay"
+bind -T tts t     display-popup -E -w 95% -h 7 "TTS_POPUP_SESSION='#{session_name}' ~/.local/bin/tts-popup"
+bind -T tts Space display-popup -E -w 95% -h 3 "~/.local/bin/tts-ctl toggle '#{session_name}'"
+bind -T tts r     display-popup -E -w 95% -h 3 "~/.local/bin/tts-ctl replay '#{session_name}'"
 ```
 
-Hotkeys inside the interactive popup: `Space` toggle, `p` pause, `R`
-resume, `r` replay, `h`/`l` seek ±5s, `H`/`L` seek ±30s, `-`/`=`
-volume ±5, `q` (or `Esc`) close. Width is given as a percentage so
+The `'#{session_name}'` argument pins replay/toggle to the invoking tmux
+session. Without it, `display-popup -E` doesn't reliably propagate
+`$TMUX_PANE`, and the popup would replay clips from whichever session
+`tts-ctl` happened to resolve.
+
+Hotkeys inside the interactive popup: `Space` reload-or-toggle (loads
+this session's latest if a different clip is loaded; otherwise cycles
+pause), `r` replay, `0` seek to start, `h`/`l` seek ±5s, `H`/`L` seek
+±30s, `-`/`=` volume ±5, `m` mute toggle, `q` (or `Esc`) close. The
+popup auto-closes `TTS_POPUP_AUTO_CLOSE` seconds after playback ends
+(default 10, set to 0 to disable). Width is given as a percentage so
 the popup fits on narrow displays (Termux on a phone).
 
 ## Adding a new agent hook
