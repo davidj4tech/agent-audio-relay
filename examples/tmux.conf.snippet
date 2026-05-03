@@ -22,5 +22,7 @@ bind T switch-client -T tts
 # literal `#{` in TTS_POPUP_SESSION, but the explicit set-environment is
 # the correct primary route.
 bind -T tts t     set-environment -g TTS_POPUP_SESSION "#{session_name}" \; display-popup -E -w 22 -h 3 -x R -y 0 "~/.local/bin/tts-popup"
+# Shortcut: M-t (Alt-t) opens the same popup with no prefix at all.
+bind -n M-t       set-environment -g TTS_POPUP_SESSION "#{session_name}" \; display-popup -E -w 22 -h 3 -x R -y 0 "~/.local/bin/tts-popup"
 bind -T tts Space run-shell "~/.local/bin/tts-ctl toggle '#{session_name}'"
 bind -T tts r     run-shell "~/.local/bin/tts-ctl replay '#{session_name}'"

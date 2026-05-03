@@ -34,6 +34,7 @@ opt() {
 }
 
 PREFIX_KEY=$(opt @tts-prefix-key      T)
+POPUP_KEY=$( opt @tts-popup-key       M-t)
 POPUP_W=$(   opt @tts-popup-width     22)
 POPUP_H=$(   opt @tts-popup-height    3)
 POPUP_X=$(   opt @tts-popup-x         R)
@@ -51,6 +52,12 @@ tmux bind "$PREFIX_KEY" switch-client -T tts
 # `display-popup` does not format-expand its shell-command argument,
 # so we route the session via tmux's set-environment (which does).
 tmux bind -T tts t \
+    set-environment -g TTS_POPUP_SESSION '#{session_name}' \\\; \
+    display-popup -E -w "$POPUP_W" -h "$POPUP_H" -x "$POPUP_X" -y "$POPUP_Y" \
+    'tts-popup'
+
+# No-prefix shortcut to the same popup.
+tmux bind -n "$POPUP_KEY" \
     set-environment -g TTS_POPUP_SESSION '#{session_name}' \\\; \
     display-popup -E -w "$POPUP_W" -h "$POPUP_H" -x "$POPUP_X" -y "$POPUP_Y" \
     'tts-popup'
