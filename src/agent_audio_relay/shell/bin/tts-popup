@@ -10,7 +10,7 @@
 #   - / =   volume -5 / +5
 #   q / Esc close
 set -u
-TTS_CTL="${TTS_CTL:-$HOME/.local/bin/tts-ctl}"
+TTS_CTL="${TTS_CTL:-tts-ctl}"
 
 draw() {
     clear

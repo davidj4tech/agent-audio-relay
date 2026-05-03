@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-audio-relay"
-version = "0.2.0"
+version = "0.3.0"
 description = "Bidirectional voice interface for coding agents — TTS from agent responses to pluggable playback targets, with hooks for Claude Code, Codex, OpenCode, and Home Assistant"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -28,7 +28,19 @@ Homepage = "https://github.com/davidj4tech/agent-audio-relay"
 Issues = "https://github.com/davidj4tech/agent-audio-relay/issues"
 
 [project.scripts]
-agent-audio-relay = "agent_audio_relay.watcher:main"
+agent-audio-relay              = "agent_audio_relay.watcher:main"
+agent-audio-relay-forwarder    = "agent_audio_relay.shell_launcher:forwarder"
+agent-audio-relay-hooks-dir    = "agent_audio_relay.shell_launcher:hooks_dir"
+tts-emit                       = "agent_audio_relay.shell_launcher:tts_emit"
+tts-ctl                        = "agent_audio_relay.shell_launcher:tts_ctl"
+tts-popup                      = "agent_audio_relay.shell_launcher:tts_popup"
+claude-code-tts-hook           = "agent_audio_relay.shell_launcher:claude_code_hook"
+opencode-tts-hook              = "agent_audio_relay.shell_launcher:opencode_hook"
+codex-tts-hook                 = "agent_audio_relay.shell_launcher:codex_hook"
+ha-tts-bridge                  = "agent_audio_relay.shell_launcher:ha_bridge"
 
 [tool.hatch.build.targets.wheel]
+# `packages` ships the entire `src/agent_audio_relay` tree, including the
+# bash scripts under shell/. The shell_launcher.py entries in
+# [project.scripts] resolve those scripts at runtime via __file__.
 packages = ["src/agent_audio_relay"]

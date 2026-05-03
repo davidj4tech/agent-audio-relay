@@ -4,9 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-# Adjust the path to wherever you've checked out the repo, or symlink the
-# script into ~/.local/bin/.
-ExecStart=%h/.local/bin/agent-audio-relay-forwarder.sh
+ExecStart=%h/.local/bin/agent-audio-relay-forwarder
 # Override defaults if needed:
 # Environment=RELAY_FWD_REMOTE=p8ar
 # Environment=RELAY_FWD_REMOTE_BASE=.cache/agent-audio-relay

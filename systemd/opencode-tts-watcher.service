@@ -5,9 +5,6 @@ Wants=agent-audio-relay.service
 
 [Service]
 Type=simple
-# Adjust to your install path:
-# ExecStart=/path/to/agent-audio-relay/hooks/opencode-tts-hook.sh
-#
 # systemd's user PATH is minimal — if `opencode` or `edge-tts` live in
 # ~/.nvm or ~/.local/bin, pin them explicitly:
 # Environment=RELAY_OPENCODE_BIN=%h/.nvm/versions/node/<ver>/bin/opencode
@@ -18,9 +15,9 @@ Type=simple
 # Environment=OPENCODE_TTS_VOICE=marin
 # Environment=OPENCODE_TTS_OPENAI_PYTHON=%h/.pyenv/versions/<env>/bin/python3
 # OPENAI_API_KEY must be in the unit env. One pattern: source a shell secrets file:
-# ExecStart=/bin/bash -c 'set -a; . %h/.config/shell/secrets.zsh; exec /path/to/agent-audio-relay/hooks/opencode-tts-hook.sh'
+# ExecStart=/bin/bash -c 'set -a; . %h/.config/shell/secrets.zsh; exec %h/.local/bin/opencode-tts-hook'
 
-ExecStart=/path/to/agent-audio-relay/hooks/opencode-tts-hook.sh
+ExecStart=%h/.local/bin/opencode-tts-hook
 Restart=always
 RestartSec=5
 
