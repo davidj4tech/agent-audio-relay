@@ -1,8 +1,12 @@
 #!/bin/bash
 # Interactive tts-popup — meant to run inside `tmux display-popup -E`.
-# Designed as a compact top-right status overlay (~35 cols, 1 row):
+# Designed as a tiny top-right key-capture overlay paired with the
+# status-line in tmux's status-right (which shows the progress bar).
+# The popup itself just shows the session and current state, and exists
+# mostly to put tmux in a key-capture mode for the duration. Suggested
+# tmux binding: `display-popup -E -w 20 -h 3 -x R -y 0`.
 #
-#   ▶ 00:08 ████░░░░░░░░░░░ 00:55
+#   ▶ aar
 #
 # Single-key hotkeys (no on-screen hints — keep popup compact; see README):
 #   Space   toggle play/pause
@@ -171,11 +175,11 @@ draw() {
     else
         state='▶'
     fi
-    cols="${COLUMNS:-80}"
-    # Reserve space for the surrounding label/time/vol text.
-    barw=$(( cols - 40 ))
-    [ "$barw" -lt 8 ] && barw=8
-    [ "$barw" -gt 50 ] && barw=50
+    # No bar inside the popup — the progress bar lives in tmux's
+    # status-right via tts-status-line. Popup is just a key-capture
+    # overlay, kept tiny so it doesn't visually compete with the
+    # status bar.
+    :
 
     # Detect "we asked mpv to load and nothing happened" so the user knows
     # Space did something — without it, a session that has no clip on the
@@ -197,12 +201,8 @@ draw() {
             label=$(nowplaying_label "$path")
         fi
     fi
-    local vol_field="vol=${vol%.*}"
-    [ "$mute" = "true" ] && vol_field+=" [M]"
-    local pos_t dur_t bar_str
-    pos_t=$(fmt_time "$pos")
-    dur_t=$(fmt_time "$dur")
-    bar_str=$(bar "$pos" "$dur" "$barw")
+    local mute_suffix=""
+    [ "$mute" = "true" ] && mute_suffix=' [M]'
     # Build the whole frame in one buffer and emit with a single printf.
     # tmux's popup renderer applies the entire write atomically, so the
     # user never sees the bar half-drawn or the label arrive before the
@@ -212,7 +212,7 @@ draw() {
     # One-line layout. \033[K erases any prior-frame residue; \033[J
     # below wipes anything that was drawn on lines 2+ by an older popup.
     local frame=$'\033[H'
-    frame+="${label}  ${state} ${pos_t} ${bar_str} ${dur_t}  ${vol_field}"
+    frame+="${state} ${label}${mute_suffix}"
     frame+=$'\033[K\033[J'
     # Only emit if the rendered output changed. Bar cells only cross a
     # boundary every ~(duration/width) seconds, but draw() runs every

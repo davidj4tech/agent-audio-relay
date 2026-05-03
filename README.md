@@ -573,6 +573,31 @@ popup auto-closes `TTS_POPUP_AUTO_CLOSE` seconds after playback ends
 (default 10, set to 0 to disable). Width is given as a percentage so
 the popup fits on narrow displays (Termux on a phone).
 
+### As a tmux plugin (TPM)
+
+For users of [TPM](https://github.com/tmux-plugins/tpm), the repo ships
+a `tts.tmux` entry point at the root that wires up the popup binding +
+status-right integration in one go:
+
+```tmux
+set -g @plugin 'davidj4tech/agent-audio-relay'
+# Optional overrides — defaults shown:
+# set -g @tts-prefix-key      T
+# set -g @tts-popup-width     22
+# set -g @tts-popup-height    3
+# set -g @tts-popup-x         R
+# set -g @tts-popup-y         0
+# set -g @tts-status-line     on
+# set -g @tts-status-interval 1
+run '~/.tmux/plugins/tpm/tpm'
+```
+
+You still need `pip install --user agent-audio-relay` (or equivalent)
+on each host so `tts-ctl`, `tts-popup`, and `tts-status-line` are on
+`$PATH` — the plugin only sets up the tmux side. If you'd rather not
+use TPM, source `examples/tmux.conf.snippet` from your tmux config
+instead.
+
 ### Status-line integration
 
 For an always-on display that doesn't take a popup, add `tts-status-line`

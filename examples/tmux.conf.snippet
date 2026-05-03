@@ -9,12 +9,11 @@
 #   r      → replay latest from current tmux session
 
 bind T switch-client -T tts
-# Session is passed explicitly (not derived from $TMUX_PANE inside the popup,
-# which can resolve to the popup's own pane and miss the invoking session —
-# at which point tts-ctl silently falls back to the global `latest` symlink
-# and you hear a clip from some unrelated host/session).
-# `-h 3` because tmux popups render with a 1-row top + 1-row bottom border;
-# `-h 3` gives a single visible content row, which is all this layout needs.
-bind -T tts t     display-popup -E -w 75% -h 3 "TTS_POPUP_SESSION='#{session_name}' ~/.local/bin/tts-popup"
-bind -T tts Space run-shell "~/.local/bin/tts-ctl toggle '#{session_name}' ; tmux display-message \"TTS $(~/.local/bin/tts-ctl status)\""
-bind -T tts r     run-shell "~/.local/bin/tts-ctl replay '#{session_name}' ; tmux display-message \"TTS replay\""
+# Tiny key-capture popup pinned to the top-right corner. The progress bar
+# itself lives in tmux's status-right via tts-status-line, so the popup
+# only needs to capture key events. -w 22 -h 3 is the smallest tmux popup
+# that fits the `▶ <session>` indicator with default border. -x R -y 0
+# anchors top-right.
+bind -T tts t     display-popup -E -w 22 -h 3 -x R -y 0 "TTS_POPUP_SESSION='#{session_name}' ~/.local/bin/tts-popup"
+bind -T tts Space run-shell "~/.local/bin/tts-ctl toggle '#{session_name}'"
+bind -T tts r     run-shell "~/.local/bin/tts-ctl replay '#{session_name}'"
