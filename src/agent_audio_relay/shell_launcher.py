@@ -31,6 +31,7 @@ def _exec(rel: str) -> None:
 def tts_drop() -> None:           _exec("bin/tts-drop")
 def tts_ctl() -> None:            _exec("bin/tts-ctl")
 def tts_popup() -> None:          _exec("bin/tts-popup")
+def mpv_tunnel() -> None:         _exec("bin/aar-mpv-tunnel")
 def forwarder() -> None:          _exec("bin/agent-audio-relay-forwarder.sh")
 def claude_code_hook() -> None:   _exec("hooks/claude-code-tts-hook.sh")
 def opencode_hook() -> None:      _exec("hooks/opencode-tts-hook.sh")

@@ -481,6 +481,27 @@ systemctl --user daemon-reload
 systemctl --user reenable --now agent-audio-relay-forwarder
 ```
 
+**mpv-tts ssh tunnel (recommended, on every host that uses tts-ctl /
+tts-popup).** Persistent ssh unix-socket forward to the phone's mpv-tts
+IPC. Without it, every popup redraw and every `tts-ctl` op forks a
+fresh ssh process — ~700ms per round-trip over Tailscale and stalls
+indefinitely when the phone is asleep. With it, the tunnel's ssh
+keepalives keep Tailscale warm, IPC ops use a local socat call
+(~110ms RTT), and tts-ctl auto-discovers the local socket without any
+env-var setup:
+
+```sh
+cp systemd/aar-mpv-tunnel.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user reenable --now aar-mpv-tunnel
+```
+
+If the tunnel drops (phone deep sleep, Tailscale flap), the script
+auto-reconnects after a short backoff and tts-ctl falls back to the
+slower ssh-fork path during the gap. On the phone side, run
+`termux-wake-lock` once in the Termux session that hosts mpv-tts so
+the OS doesn't pause it during deep sleep.
+
 **OpenCode watcher (optional, on whichever host runs OpenCode).** Hook
 script only — does not need the relay binary installed:
 

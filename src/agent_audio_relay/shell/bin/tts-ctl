@@ -21,7 +21,19 @@ ARCHIVE_DIR="${CLAUDE_TTS_PHONE_ARCHIVE:-/data/data/com.termux/files/home/.local
 # Audio extensions to try, in order. Pi-rp/Qwen produces wav; Claude/edge/openai
 # produce mp3. The first matching `latest{--session,}.{ext}` wins.
 EXTS=(${CLAUDE_TTS_EXT:-wav mp3 opus ogg})
-SOCK="${MPV_TTS_SOCK:-/data/data/com.termux/files/usr/tmp/mpv-tts.sock}"
+# Socket auto-discovery: prefer an explicit MPV_TTS_SOCK; otherwise use
+# the local tunnel socket if `aar-mpv-tunnel` is running (set up by the
+# systemd user service); otherwise fall back to the on-phone path. The
+# tunnel turns every IPC op into a local socat call (saves ~600ms vs an
+# ssh fork) and uses ssh keepalives to keep Tailscale warm.
+_default_local_sock="${XDG_STATE_HOME:-$HOME/.local/state}/agent-audio-relay/mpv-tts.sock"
+if [ -n "${MPV_TTS_SOCK:-}" ]; then
+    SOCK="$MPV_TTS_SOCK"
+elif [ -S "$_default_local_sock" ]; then
+    SOCK="$_default_local_sock"
+else
+    SOCK="/data/data/com.termux/files/usr/tmp/mpv-tts.sock"
+fi
 
 slug() {
     printf '%s' "$1" | tr -c 'A-Za-z0-9-' '-' | sed 's/-\+/-/g; s/^-//; s/-$//'

@@ -1,0 +1,64 @@
+#!/bin/bash
+# Persistent ssh unix-socket tunnel to the phone's mpv-tts IPC socket.
+#
+# Why: every `tts-ctl` op and every `tts-popup` redraw otherwise forks a
+# fresh ssh process — which costs ~700ms per round-trip over Tailscale
+# (network + ssh handshake), and stalls indefinitely when the phone is
+# asleep. With this tunnel up, tts-ctl auto-discovers the local socket
+# (~/.local/state/agent-audio-relay/mpv-tts.sock by default) and uses
+# it via socat directly — latency is one network RTT (~110ms), and the
+# tunnel's keepalives keep Tailscale warm so the phone stays reachable.
+#
+# When the tunnel drops (phone deep sleep, network change), ssh exits;
+# this script removes the stale local socket and reconnects after a
+# short backoff. tts-ctl then naturally falls back to its slower
+# ssh-fork path until the tunnel is back, so commands still work just
+# more slowly during reconnection.
+#
+# Designed to run as a systemd user unit (see systemd/aar-mpv-tunnel.service).
+#
+# Env:
+#   AAR_MPV_TUNNEL_HOST     SSH alias of the phone (default: $CLAUDE_TTS_PHONE_HOST or p8ar)
+#   AAR_MPV_TUNNEL_LOCAL    Local unix socket path
+#                             (default: $XDG_STATE_HOME/agent-audio-relay/mpv-tts.sock)
+#   AAR_MPV_TUNNEL_REMOTE   Remote unix socket path on the phone
+#                             (default: /data/data/com.termux/files/usr/tmp/mpv-tts.sock)
+#   AAR_MPV_TUNNEL_BACKOFF  Seconds to wait between reconnection attempts (default: 3)
+set -u
+
+REMOTE_HOST="${AAR_MPV_TUNNEL_HOST:-${CLAUDE_TTS_PHONE_HOST:-p8ar}}"
+LOCAL_SOCK="${AAR_MPV_TUNNEL_LOCAL:-${XDG_STATE_HOME:-$HOME/.local/state}/agent-audio-relay/mpv-tts.sock}"
+REMOTE_SOCK="${AAR_MPV_TUNNEL_REMOTE:-/data/data/com.termux/files/usr/tmp/mpv-tts.sock}"
+BACKOFF="${AAR_MPV_TUNNEL_BACKOFF:-3}"
+
+mkdir -p "$(dirname "$LOCAL_SOCK")"
+
+cleanup() {
+    rm -f "$LOCAL_SOCK"
+    exit 0
+}
+trap cleanup INT TERM HUP
+
+echo "[aar-mpv-tunnel] $LOCAL_SOCK -> $REMOTE_HOST:$REMOTE_SOCK" >&2
+
+while true; do
+    # StreamLocalBindUnlink: have ssh remove a stale local socket before
+    # binding (otherwise it errors on EADDRINUSE after a crash).
+    # ServerAlive*: detect dead links in ~30s without waiting for TCP timeout.
+    # ExitOnForwardFailure: bail immediately if the forward can't be set up
+    # (e.g. local-socket bind error), so we don't sit in a half-connected
+    # ssh thinking we're forwarding when we're not.
+    ssh -N \
+        -L "${LOCAL_SOCK}:${REMOTE_SOCK}" \
+        -o BatchMode=yes \
+        -o ConnectTimeout=10 \
+        -o ServerAliveInterval=15 \
+        -o ServerAliveCountMax=2 \
+        -o ExitOnForwardFailure=yes \
+        -o StreamLocalBindUnlink=yes \
+        "$REMOTE_HOST" 2>&1
+    rc=$?
+    rm -f "$LOCAL_SOCK"
+    echo "[aar-mpv-tunnel] ssh exited rc=$rc; reconnecting in ${BACKOFF}s" >&2
+    sleep "$BACKOFF"
+done

@@ -1,0 +1,23 @@
+[Unit]
+Description=agent-audio-relay mpv-tts ssh tunnel (persistent unix-socket forward)
+After=network-online.target
+# Tunnel is what tts-ctl/tts-popup use for their fast path. Without it
+# they fall back to per-command ssh forks (~700ms each over Tailscale)
+# and stall when the phone is asleep.
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/aar-mpv-tunnel
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Override the phone host or socket paths via Environment= if your
+# setup differs from the defaults (CLAUDE_TTS_PHONE_HOST=p8ar,
+# remote socket at $PREFIX/tmp/mpv-tts.sock under Termux).
+# Environment=AAR_MPV_TUNNEL_HOST=p8ar
+# Environment=AAR_MPV_TUNNEL_REMOTE=/data/data/com.termux/files/usr/tmp/mpv-tts.sock
+
+[Install]
+WantedBy=default.target

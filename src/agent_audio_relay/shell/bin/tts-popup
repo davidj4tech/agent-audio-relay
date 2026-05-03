@@ -30,7 +30,18 @@ fi
 # pays a fresh ssh handshake. If the user's ssh config already provides
 # a working ControlMaster for the phone host, reuse it (do nothing).
 # Otherwise open one for the popup's lifetime.
-_SOCK="${MPV_TTS_SOCK:-/data/data/com.termux/files/usr/tmp/mpv-tts.sock}"
+# Socket auto-discovery (mirrors tts-ctl): prefer an explicit MPV_TTS_SOCK,
+# otherwise the tunnel socket from `aar-mpv-tunnel` if present, otherwise
+# the on-phone Termux path. When the tunnel socket exists locally, the
+# rest of this block (ad-hoc ControlMaster setup) is unnecessary.
+_default_local_sock="${XDG_STATE_HOME:-$HOME/.local/state}/agent-audio-relay/mpv-tts.sock"
+if [ -n "${MPV_TTS_SOCK:-}" ]; then
+    _SOCK="$MPV_TTS_SOCK"
+elif [ -S "$_default_local_sock" ]; then
+    _SOCK="$_default_local_sock"
+else
+    _SOCK="/data/data/com.termux/files/usr/tmp/mpv-tts.sock"
+fi
 _CTL_DIR=""
 _CTL_PATH=""
 _PHONE_HOST=""
