@@ -661,6 +661,99 @@ upstream `~/.tmux.conf`.
 | `TTS_STATUS_BAR_WIDTH` | `12` | Width of the █░ progress bar |
 | `TTS_STATUS_HIDE_IDLE` | `1` | Set `0` to show `○` instead of empty when idle |
 
+## Streaming TTS for `llm` and friends (`tts-stream`)
+
+The hooks for Claude Code / Codex / opencode all fire *post-completion*:
+the agent finishes, the hook reads the final text, `tts-drop` generates
+one mp3, the forwarder ships it. Latency-from-finish-to-audio is
+dominated by edge/openai TTS render time (~1-2s for short text). Fine
+for short notifications.
+
+For a streaming model output (e.g. `llm "..."` producing a multi-paragraph
+response), waiting for the whole thing to render before any audio plays
+feels laggy. `tts-stream` is the streaming sibling of `tts-drop`:
+
+```sh
+llm "explain X" | tts-stream                              # text + audio
+llm "..." | tee >(tts-stream >/dev/null)                  # tee form
+llm "..." | tts-stream --no-tee >/dev/null                # silent (no echo)
+```
+
+Audio starts within ~3s of the first sentence completing instead of
+waiting for the whole response. Sentence-boundary segmenter (with
+abbreviation exceptions and a force-split fallback at ~240 chars), eager
+first-segment split at the first `,;:` past 60 chars to minimise
+time-to-first-audio, bounded parallel rendering (default 2 workers),
+order-preserving dispatch. Skips fenced code blocks since reading them
+produces noise.
+
+### Architecture (sam-radio-style HTTP streaming)
+
+`tts-stream` doesn't dispatch per-segment loadfiles to mpv (mpv-voice
+is on the phone, the audio files are on the producer host — paths
+don't resolve across the tunnel). Instead, each invocation:
+
+1. Binds an HTTP server on a random local port for the run's lifetime.
+2. Sends mpv-voice exactly one `loadfile http://<host>:<port>/stream.mp3`
+   (preceded by `stop` to clear any prior playback state).
+3. Pushes each rendered segment's MP3 bytes into the HTTP stream queue
+   *in seq order* — concatenated MP3 frames produce a valid byte stream
+   that mpv plays continuously. mpv's cache buffers ~1-2s and starts
+   playing as soon as it fills.
+4. On stdin EOF: signals end-of-stream, waits for the handler to flush
+   to mpv, tears the server down.
+5. Concatenates the per-segment files into one full-response clip and
+   drops into `/tmp/tts-llm/`. Forwarder ships it through the normal
+   pipeline so `tts-ctl replay` / `prev` / `next` walk **responses**,
+   not segments.
+
+The phone resolves the producer's hostname via Tailscale MagicDNS. If
+that doesn't apply to your setup, set `AAR_STREAM_HOST=<reachable
+host-or-ip>` so the URL we hand to mpv resolves phone-side.
+
+### Engine and configuration
+
+Defaults to **openai** (`gpt-4o-mini-tts`) when `OPENAI_API_KEY` is set
+— noticeably more natural prosody for long-form spoken content — and
+**edge** (`en-US-AriaNeural`) otherwise. `RELAY_TTS_ENGINE=edge|openai`
+forces a choice. `tts-stream` auto-discovers an openai-capable Python
+in the usual pipx venv locations (`~/.local/pipx/venvs/openai`, `…/llm`)
+when the default `python3` lacks the `openai` module, so you don't
+typically need to set `RELAY_OPENAI_PYTHON`.
+
+```sh
+tts-stream --engine openai                    # explicit
+tts-stream --engine edge --voice en-GB-RyanNeural  # custom voice
+tts-stream --max-workers 3                    # more in-flight renders
+tts-stream --no-archive                       # skip the post-stream concat
+tts-stream -v                                 # per-event timestamp logging
+```
+
+### Panic button
+
+`tts-ctl stop-all` silences every channel (tts/voice/music) regardless
+of which session originated playback, and pkills any in-flight
+`tts-stream` producer processes so they don't keep generating into a
+silent consumer. Useful when a streaming response from another session
+is making noise and you just want it to stop.
+
+### Caveats
+
+- **First-sentence latency floor** is engine round-trip (~1-2s for
+  openai, ~1s for edge). The eager-first-segment split keeps it from
+  being worse, but you can't go below that without per-byte streaming
+  of the engine response (deliberately not built; marginal win for
+  significant complexity).
+- **Eager-first-split** intentionally cuts at a comma rather than the
+  end of the opening sentence — first segment may end mid-clause for
+  prosody-perfect ears. Tradeoff for time-to-first-audio.
+- **Prior-run leftover** would replay near the end of a new stream
+  before we added the pre-loadfile `stop`. If it ever resurfaces,
+  inspect `mpv-voice` log for fresh `● Audio` events or duration
+  changes mid-playback.
+- **Code blocks are silenced**. Anything between fenced ` ``` ` markers
+  is stripped before TTS. Don't rely on `tts-stream` to read code.
+
 ## Adding a new agent hook
 
 To add TTS for any new tool, write a script that:
