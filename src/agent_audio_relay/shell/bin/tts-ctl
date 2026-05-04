@@ -239,16 +239,29 @@ case "${1:-}" in
         elif [ -n "$_sess" ]; then
             _sslug=$(slug "$_sess")
             _curbase="${_cur##*/}"
-            case "$_curbase" in
-                latest--"$_sslug".*|latest--*--"$_sslug".*|latest--"$_sslug"__*) ;;
+            case "$_cur" in
+                # Live HTTP stream (tts-stream/sam-radio-style). Session
+                # reload doesn't apply — Space should just pause/unpause.
+                http://*|https://*) ;;
                 *)
-                    # Path doesn't look like a symlink for this session.
-                    # Resolve target and compare. If no clip exists for this
-                    # session, _target stays empty and we'll fall through to
-                    # cycle pause below — better than firing loadfile of a
-                    # synthetic path that breaks mpv's state.
-                    _target=$(replay_target "$_sess") || _target=""
-                    [ -n "$_target" ] && [ "$_cur" != "$_target" ] && _need_reload=1
+                    case "$_curbase" in
+                        # Session-matched symlinks AND archive filenames.
+                        # The archive pattern (`*--<sslug>__*`) was missing
+                        # before, which caused Space-on-mid-clip to fire
+                        # replay_target → return the latest symlink (same
+                        # file, different path string) → trigger an
+                        # unwanted reload instead of pausing.
+                        latest--"$_sslug".*|latest--*--"$_sslug".*|latest--"$_sslug"__*) ;;
+                        *--"$_sslug"__*) ;;
+                        *)
+                            # Path doesn't look like this session's content.
+                            # Resolve target and compare. If no clip exists
+                            # for this session, _target stays empty and
+                            # we'll fall through to cycle pause below.
+                            _target=$(replay_target "$_sess") || _target=""
+                            [ -n "$_target" ] && [ "$_cur" != "$_target" ] && _need_reload=1
+                            ;;
+                    esac
                     ;;
             esac
         fi
