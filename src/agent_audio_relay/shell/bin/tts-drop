@@ -131,69 +131,45 @@ if [ -n "$DEDUP_KEY" ]; then
     fi
 fi
 
-generate_edge() {
-    local outfile="$1" voice="$2"
-    "$EDGE_BIN" --text "$text" --voice "$voice" --write-media "$outfile" 2>/dev/null
-}
+# All engine-specific TTS rendering is delegated to `aar-tts-render`
+# (Python module agent_audio_relay.tts_render). One source of truth
+# shared with tts-stream — adding a new engine in tts_render.py makes
+# it available to every hook automatically. tts-drop keeps owning the
+# orchestration: dedup, drop dir, atomic rename, latest-symlink stem.
+#
+# qwen produces wav, others mp3 — pick the file extension to match.
+case "$ENGINE" in
+    qwen) STAGING_EXT="wav" ;;
+    *)    STAGING_EXT="mp3" ;;
+esac
 
-generate_openai() {
-    local outfile="$1" err_file rc
-    err_file=$(mktemp)
-    TTS_TEXT="$text" TTS_OUTFILE="$outfile" TTS_MODEL="$OPENAI_MODEL" TTS_VOICE="$VOICE" \
-        "$OPENAI_PYTHON" - 2>"$err_file" <<'PY'
-import os, sys
-try:
-    from openai import OpenAI
-    client = OpenAI()
-    with client.audio.speech.with_streaming_response.create(
-        model=os.environ["TTS_MODEL"],
-        voice=os.environ["TTS_VOICE"],
-        input=os.environ["TTS_TEXT"],
-    ) as resp:
-        resp.stream_to_file(os.environ["TTS_OUTFILE"])
-except Exception as e:
-    msg = str(e)
-    code = getattr(getattr(e, "response", None), "status_code", None) \
-        or getattr(e, "status_code", None)
-    name = type(e).__name__
-    sys.stderr.write(f"{name}{f' ({code})' if code else ''}: {msg}\n")
-    sys.exit(1)
-PY
-    rc=$?
-    if [ $rc -ne 0 ] || [ ! -s "$outfile" ]; then
-        local reason
-        reason=$(tr '\n' ' ' < "$err_file" | sed 's/  */ /g; s/^ //; s/ $//')
-        [ -z "$reason" ] && reason="unknown error"
-        log "openai TTS failed: $reason"
-        rm -f "$err_file"
-        return 1
-    fi
-    rm -f "$err_file"
-    return 0
-}
-
-# Stage outside the watched dir, then atomically rename. Avoids
-# the watcher seeing intermediate close_writes (e.g. openai streaming
-# chunks, fallback overwriting failed openai output).
-final="${DROP_DIR}/$(make_stem "$TAG" "$KIND" "$SESSION").mp3"
-staging=$(mktemp --suffix=.mp3)
+# Stage outside the watched dir, then atomically rename. Avoids the
+# watcher seeing intermediate close_writes (e.g. partial-bytes during
+# streaming render).
+final="${DROP_DIR}/$(make_stem "$TAG" "$KIND" "$SESSION").${STAGING_EXT}"
+staging=$(mktemp --suffix=".${STAGING_EXT}")
 trap 'rm -f "$staging"' EXIT
 
-case "$ENGINE" in
-    edge)
-        generate_edge "$staging" "$VOICE" || true
-        ;;
-    openai)
-        if ! generate_openai "$staging"; then
-            # Fallback to edge.
-            generate_edge "$staging" "$EDGE_VOICE" || true
-        fi
-        ;;
-    *)
-        log "unknown engine: $ENGINE"
-        exit 1
-        ;;
-esac
+# Build the renderer command. Pass per-engine knobs through; the
+# renderer ignores ones that don't apply to the chosen engine.
+render_args=(
+    --engine "$ENGINE"
+    --out    "$staging"
+    --voice  "$VOICE"
+    --edge-voice  "$EDGE_VOICE"
+    --edge-bin    "$EDGE_BIN"
+    --openai-model "$OPENAI_MODEL"
+    --openai-python "$OPENAI_PYTHON"
+)
+err_file=$(mktemp)
+if ! printf '%s' "$text" | aar-tts-render "${render_args[@]}" 2>"$err_file"; then
+    reason=$(tr '\n' ' ' < "$err_file" | sed 's/  */ /g; s/^ //; s/ $//')
+    [ -z "$reason" ] && reason="unknown error"
+    log "render failed ($ENGINE): $reason"
+    rm -f "$err_file"
+    exit 1
+fi
+rm -f "$err_file"
 
 if [ ! -s "$staging" ]; then
     log "generation produced no audio; nothing dropped"

@@ -172,49 +172,11 @@ def _split_segments(buf: str, *, drain: bool, eager_first: bool = False) -> tupl
 
 
 # --- Engines ---------------------------------------------------------------
+# Engine logic lives in tts_render.py so tts-drop (bash) and tts-stream
+# (this module) share a single source of truth via the aar-tts-render
+# console script (tts-drop) or direct import (tts-stream).
 
-
-def _render_edge(text: str, outfile: Path, *, voice: str, edge_bin: str) -> bool:
-    proc = subprocess.run(
-        [edge_bin, "--text", text, "--voice", voice, "--write-media", str(outfile)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    return proc.returncode == 0 and outfile.exists() and outfile.stat().st_size > 0
-
-
-def _render_openai(text: str, outfile: Path, *, voice: str, model: str, python_bin: str) -> tuple[bool, str]:
-    """Returns (ok, stderr_text). Caller logs the stderr when ok is False
-    so failures aren't silent — the most common failure mode is the
-    chosen python lacking the ``openai`` module, which is recoverable
-    by pointing ``--openai-python`` (or ``RELAY_OPENAI_PYTHON``) at the
-    right venv.
-    """
-    script = (
-        "import os, sys\n"
-        "from openai import OpenAI\n"
-        "client = OpenAI()\n"
-        "with client.audio.speech.with_streaming_response.create(\n"
-        "    model=os.environ['TTS_MODEL'],\n"
-        "    voice=os.environ['TTS_VOICE'],\n"
-        "    input=os.environ['TTS_TEXT'],\n"
-        ") as resp:\n"
-        "    resp.stream_to_file(os.environ['TTS_OUTFILE'])\n"
-    )
-    env = os.environ.copy()
-    env["TTS_MODEL"] = model
-    env["TTS_VOICE"] = voice
-    env["TTS_TEXT"] = text
-    env["TTS_OUTFILE"] = str(outfile)
-    proc = subprocess.run(
-        [python_bin, "-c", script],
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-    )
-    err = proc.stderr.decode(errors="replace").strip()
-    ok = proc.returncode == 0 and outfile.exists() and outfile.stat().st_size > 0
-    return ok, err
+from .tts_render import render_text as _render_text  # noqa: E402
 
 
 # --- mpv IPC ---------------------------------------------------------------
@@ -430,36 +392,38 @@ class StreamRunner:
     # --- segment rendering -------------------------------------------------
 
     def _render(self, seq: int, text: str) -> Optional[Path]:
-        outfile = self.work_dir / f"{seq:04d}.mp3"
-        ok = False
-        if self.args.engine == "openai":
-            ok, err = _render_openai(
-                text, outfile,
-                voice=self.args.voice or self.args.openai_voice,
-                model=self.args.openai_model,
-                python_bin=self.args.openai_python,
+        # qwen produces wav, edge/openai produce mp3. mpv handles either,
+        # but file extension matters for the concat-archive path which
+        # passes through tts-drop expecting a single content type.
+        ext = "wav" if self.args.engine == "qwen" else "mp3"
+        outfile = self.work_dir / f"{seq:04d}.{ext}"
+
+        def _on_fallback(engine: str, err: str) -> None:
+            # Surface the original engine's error so silent fallback
+            # doesn't mask configuration problems (e.g. missing API key,
+            # missing openai module in chosen python).
+            self.errors.append(
+                f"seg {seq}: {engine} failed ({err or 'no stderr'}); "
+                f"falling back to edge"
             )
-            if not ok:  # fall back to edge
-                # Surface the openai stderr so the user can fix the
-                # underlying issue (most common: ``ModuleNotFoundError:
-                # No module named 'openai'`` because RELAY_OPENAI_PYTHON
-                # points at a python without the openai package).
-                self.errors.append(
-                    f"seg {seq}: openai failed ({err or 'no stderr'}); "
-                    f"falling back to edge"
-                )
-                ok = _render_edge(
-                    text, outfile,
-                    voice=self.args.edge_voice, edge_bin=self.args.edge_bin,
-                )
-        else:
-            ok = _render_edge(
-                text, outfile,
-                voice=self.args.voice or self.args.edge_voice,
-                edge_bin=self.args.edge_bin,
-            )
+
+        ok, err = _render_text(
+            text, outfile,
+            engine=self.args.engine,
+            voice=self.args.voice,
+            edge_voice=self.args.edge_voice,
+            edge_bin=self.args.edge_bin,
+            openai_voice=self.args.openai_voice,
+            openai_model=self.args.openai_model,
+            openai_python=self.args.openai_python,
+            qwen_voice=self.args.qwen_voice,
+            qwen_model=self.args.qwen_model,
+            qwen_lang=self.args.qwen_lang,
+            qwen_base_url=self.args.qwen_base_url,
+            on_fallback=_on_fallback,
+        )
         if not ok:
-            self.errors.append(f"render failed for segment {seq}")
+            self.errors.append(f"seg {seq}: render failed: {err}")
             return None
         return outfile
 
@@ -766,7 +730,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "openai" if os.environ.get("OPENAI_API_KEY") else "edge"
     )
     p.add_argument("--engine", default=_default_engine,
-                   choices=["edge", "openai"])
+                   choices=["edge", "openai", "qwen"])
     p.add_argument("--voice", default=None,
                    help="Engine-specific voice name (overrides per-engine default).")
     p.add_argument("--edge-voice",
@@ -779,6 +743,16 @@ def _build_parser() -> argparse.ArgumentParser:
                    default=os.environ.get("RELAY_OPENAI_MODEL", "gpt-4o-mini-tts"))
     p.add_argument("--openai-python",
                    default=os.environ.get("RELAY_OPENAI_PYTHON", "python3"))
+    p.add_argument("--qwen-voice",
+                   default=os.environ.get("RELAY_QWEN_VOICE", "Cherry"))
+    p.add_argument("--qwen-model",
+                   default=os.environ.get("RELAY_QWEN_MODEL",
+                                          "qwen3-tts-flash-2025-11-27"))
+    p.add_argument("--qwen-lang",
+                   default=os.environ.get("RELAY_QWEN_LANG", "English"))
+    p.add_argument("--qwen-base-url",
+                   default=os.environ.get("DASHSCOPE_BASE_URL",
+                                          "https://dashscope-intl.aliyuncs.com/api/v1"))
     p.add_argument("--socket", type=Path,
                    default=Path(os.environ.get(
                        "AAR_VOICE_SOCKET",
@@ -811,36 +785,13 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _autodetect_openai_python(current: str) -> str:
-    """If ``current`` doesn't have the ``openai`` module, look for one that
-    does in the usual pipx venv locations. Returns the first python that
-    can ``import openai`` (current preferred), else ``current`` unchanged
-    so the caller's eventual error message stays attributable.
-    """
-    candidates = [current]
-    pipx_root = Path(os.environ.get("PIPX_HOME",
-                                    Path.home() / ".local" / "pipx"))
-    candidates.append(str(pipx_root / "venvs" / "openai" / "bin" / "python3"))
-    candidates.append(str(pipx_root / "venvs" / "llm" / "bin" / "python3"))
-    for c in candidates:
-        if not c or not Path(c).exists() and c != "python3":
-            continue
-        try:
-            r = subprocess.run([c, "-c", "import openai"],
-                               stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL,
-                               timeout=2)
-            if r.returncode == 0:
-                return c
-        except (OSError, subprocess.SubprocessError):
-            continue
-    return current
-
-
 def main() -> None:
     args = _build_parser().parse_args()
     if args.engine == "openai":
-        args.openai_python = _autodetect_openai_python(args.openai_python)
+        # Reuse the autodetection from tts_render so we have one
+        # implementation that adapts as we add or rename pipx venvs.
+        from .tts_render import _default_openai_python
+        args.openai_python = _default_openai_python(args.openai_python)
     if not args.session:
         # Inherit tmux session if available — same convention as tts-drop.
         if os.environ.get("TMUX"):
