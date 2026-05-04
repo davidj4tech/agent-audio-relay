@@ -42,6 +42,26 @@ pip install --user agent-audio-relay
 pip install --user /path/to/agent-audio-relay
 ```
 
+**System dependencies.** The shell-side tools (`tts-ctl`, `tts-popup`,
+`tts-status-line`, `aar-mpv-tunnel`, `agent-audio-relay-forwarder`) need
+a few binaries on `PATH` that aren't pulled in by pip:
+
+| Tool | Used by | Apt | Dnf |
+|---|---|---|---|
+| `socat` | tts-ctl/popup/status-line for mpv IPC | `apt install socat` | `dnf install socat` |
+| `jq` | tts-ctl for parsing mpv JSON-IPC replies | `apt install jq` | `dnf install jq` |
+| `inotify-tools` | forwarder watch loop | `apt install inotify-tools` | `dnf install inotify-tools` |
+| `openssh-client` | tunnel + forwarder | almost certainly already present | as above |
+
+Install all four on every host that's not the playback host. **Without
+`socat` on a consumer host, `tts-ctl`/popup will silently no-op against
+the local tunnel socket** — IPC requests go out but replies are lost,
+and the popup will look like "pause is broken." (We were bitten by this
+on AlmaLinux 9, where `socat` isn't installed by default.) Edge-tts /
+openai engines additionally need their own runtime: `pip install
+edge-tts` and/or an `openai`-equipped Python (e.g.
+`pipx install openai`).
+
 ## Deployment topologies
 
 Pick one. Mixing them — running the relay daemon on the sender *and*
