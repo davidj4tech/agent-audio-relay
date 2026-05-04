@@ -91,14 +91,26 @@ def _is_real_sentence_end(buf: str, pos: int) -> bool:
     return word not in _ABBREV
 
 
-def _split_segments(buf: str, *, drain: bool) -> tuple[list[str], str]:
+def _split_segments(buf: str, *, drain: bool, eager_first: bool = False) -> tuple[list[str], str]:
     """Pull complete segments out of ``buf``; return ``(segments, leftover)``.
 
     When ``drain=True`` (stream ended), the entire leftover is returned as
     a final segment regardless of whether it ended with sentence-final
     punctuation.
+
+    When ``eager_first=True``, the *first* segment is allowed to cut at
+    the first soft boundary (``,;:`` + space) or word-break past a low
+    char threshold, without waiting for ``.!?``. This trades sentence-
+    perfect prosody for time-to-first-audio: a typical opening clause
+    can be playing within ~1-2s of the model emitting its first token,
+    instead of waiting for the whole opening sentence to complete (which
+    on a short llm response often coincides with the *end* of the
+    response). Subsequent segments use the normal sentence-boundary
+    rules so prosody stays natural after the first cut.
     """
     segments: list[str] = []
+    eager_threshold = 60  # chars before we'll soft-split the first segment
+
     while True:
         m = _SENTENCE_END_RE.search(buf)
         if m and _is_real_sentence_end(buf, m.start()):
@@ -108,6 +120,23 @@ def _split_segments(buf: str, *, drain: bool) -> tuple[list[str], str]:
                 segments.append(chunk)
             buf = buf[end:]
             continue
+
+        # Eager first-segment split: if no segments emitted yet AND no
+        # eager segment yet AND buf has enough content, cut at the first
+        # soft boundary past the threshold. Prefer comma/semicolon/colon;
+        # fall back to a word break if none exist.
+        if eager_first and not segments and len(buf) >= eager_threshold:
+            soft_matches = list(_FORCE_SPLIT_RE.finditer(buf, eager_threshold))
+            if soft_matches:
+                cut = soft_matches[0].end()
+                chunk = buf[:cut].strip()
+                if chunk:
+                    segments.append(chunk)
+                buf = buf[cut:]
+                continue
+            # No soft boundary visible yet — wait for more text rather
+            # than splitting mid-clause. We'll fall through to the
+            # MAX_CHUNK force-split if buf grows large.
 
         # No sentence boundary — but if we've accumulated too much, force
         # split at the latest soft boundary (`,;:`). Avoids a single
@@ -230,6 +259,7 @@ class StreamRunner:
         self.work_dir = Path(args.work_dir or f"/tmp/tts-stream/{self.run_id}")
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.executor = ThreadPoolExecutor(max_workers=args.max_workers)
+        self._t0 = time.monotonic()
         self.next_dispatch = 0
         self.dispatch_lock = threading.Lock()
         self.ready: dict[int, Path] = {}
@@ -321,18 +351,26 @@ class StreamRunner:
         buf = ""
         seq = 0
         in_eof = False
-        # Read stdin in modest chunks; flush segments as soon as they're
-        # complete. Stdin is generally line-buffered when llm streams to a
-        # pipe, but read1() handles partial reads cleanly in either case.
+        # CRITICAL: read stdin via os.read(0, ...) instead of sys.stdin.read().
+        # Python's sys.stdin is wrapped in a TextIOWrapper that block-buffers
+        # (~8KB) when stdin is a pipe — so sys.stdin.read(N) waits for 8KB
+        # or EOF, defeating streaming entirely (a typical llm response is
+        # well under 8KB; you'd see nothing until the model finished). Raw
+        # os.read on fd 0 returns as soon as the kernel has any bytes for
+        # us, which is what streaming needs.
         # Strip code blocks lazily: we operate on a "speakable" view of
         # the buffer rather than the raw input, so we don't accidentally
         # treat code-internal periods as sentence boundaries.
         raw_buf = ""
         while not in_eof:
-            chunk = sys.stdin.read(256)
-            if not chunk:
+            try:
+                raw = os.read(0, 4096)
+            except OSError:
+                raw = b""
+            if not raw:
                 in_eof = True
             else:
+                chunk = raw.decode("utf-8", errors="replace")
                 raw_buf += chunk
                 if self.args.tee:
                     # Echo through unbuffered so the user sees text appear at
@@ -343,12 +381,17 @@ class StreamRunner:
             # Re-strip on every iteration since a code fence may straddle
             # chunk boundaries; the operation is cheap on text this small.
             buf_view = _strip_code_blocks(raw_buf)
+            # Eager-first-segment is gated on "we haven't dispatched
+            # anything yet for this run" — once seg 0 is out the door,
+            # downstream segments use normal sentence-boundary rules so
+            # prosody stays clean.
+            eager = (seq == 0)
             if in_eof:
                 # Drain remaining input as final segment regardless of
                 # whether it ended on punctuation.
-                segments, leftover = _split_segments(buf_view, drain=True)
+                segments, leftover = _split_segments(buf_view, drain=True, eager_first=eager)
             else:
-                segments, leftover = _split_segments(buf_view, drain=False)
+                segments, leftover = _split_segments(buf_view, drain=False, eager_first=eager)
                 # If we've stripped code blocks we can't easily reconcile
                 # `leftover` back to a position in raw_buf. Simplest: only
                 # advance raw_buf when a *complete* code block was the
@@ -365,6 +408,7 @@ class StreamRunner:
                     # skipping any code-block ranges.
                     raw_buf = _advance_raw(raw_buf, consumed)
             for chunk_text in segments:
+                self._log(f"seg {seq} cut ({len(chunk_text)} chars)")
                 fut = self.executor.submit(self._render, seq, chunk_text)
                 fut.add_done_callback(lambda f, s=seq: self._on_render_done(s, f))
                 seq += 1
@@ -424,7 +468,9 @@ class StreamRunner:
 
     def _log(self, msg: str) -> None:
         if self.args.verbose:
-            print(f"tts-stream[{self.run_id}]: {msg}", file=sys.stderr)
+            elapsed = time.monotonic() - self._t0
+            print(f"tts-stream[{self.run_id}] +{elapsed:5.2f}s: {msg}",
+                  file=sys.stderr)
 
 
 # --- stem (mirrors shell/hooks/lib/denote-stem.sh) ------------------------
