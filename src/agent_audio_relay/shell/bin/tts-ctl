@@ -75,11 +75,11 @@ TTS_SSH_DEFAULTS="-o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=3 
 mpv_cmd() {
     local json="$1"
     if [ -S "$SOCK" ]; then
-        printf '%s\n' "$json" | socat - "UNIX-CONNECT:$SOCK" 2>/dev/null
+        printf '%s\n' "$json" | socat -t 1 - "UNIX-CONNECT:$SOCK" 2>/dev/null
     else
         # shellcheck disable=SC2029,SC2086
         ssh ${TTS_SSH_DEFAULTS} ${CLAUDE_TTS_SSH_OPTS:-} "$PHONE_HOST" \
-            "printf '%s\n' $(printf '%q' "$json") | socat - 'UNIX-CONNECT:$SOCK'" \
+            "printf '%s\n' $(printf '%q' "$json") | socat -t 1 - 'UNIX-CONNECT:$SOCK'" \
             2>/dev/null
     fi
 }
@@ -99,11 +99,11 @@ mpv_batch_get() {
         i=$((i+1))
     done
     if [ -S "$SOCK" ]; then
-        raw=$(printf '%s' "$cmds" | socat - "UNIX-CONNECT:$SOCK" 2>/dev/null)
+        raw=$(printf '%s' "$cmds" | socat -t 1 - "UNIX-CONNECT:$SOCK" 2>/dev/null)
     else
         # shellcheck disable=SC2029,SC2086
         raw=$(ssh ${TTS_SSH_DEFAULTS} ${CLAUDE_TTS_SSH_OPTS:-} "$PHONE_HOST" \
-            "printf '%s' $(printf '%q' "$cmds") | socat - 'UNIX-CONNECT:$SOCK'" \
+            "printf '%s' $(printf '%q' "$cmds") | socat -t 1 - 'UNIX-CONNECT:$SOCK'" \
             2>/dev/null)
     fi
     for ((i=1; i<=${#props[@]}; i++)); do
