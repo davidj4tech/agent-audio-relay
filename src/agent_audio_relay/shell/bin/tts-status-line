@@ -83,10 +83,16 @@ _fetch_state() {
 }
 
 # Render one channel's state as a status-line string given the channel's
-# prefix and pre-fetched state lines. Returns non-zero if the channel is
-# idle OR the fetch failed (paused empty = no data, distinguishable from
-# paused="false" = playing) so the caller can try the next channel
-# without rendering a phantom empty frame.
+# prefix and pre-fetched state lines. Three return states (matters for
+# cache-vs-blank decisions in render()):
+#   0 — rendered (printed a non-empty status string)
+#   1 — channel is genuinely idle (mpv responded, idle-active=true)
+#   2 — fetch failed (no response from mpv; don't trust as "idle")
+#
+# The 1-vs-2 distinction lets render() preserve the last-known status
+# during transient IPC blips — without it, a single failed probe would
+# wipe the cached status to empty and the bar would visibly disappear
+# until the next successful refresh.
 #
 # Note: live position is *not* included in the rendered string — only
 # duration. This keeps tmux from repainting status-right every second
@@ -97,6 +103,11 @@ _render_channel() {
     local prefix="$1"; shift
     local paused="${1:-}" idle="${2:-}" pos="${3:-}" dur="${4:-}" mute="${5:-}"
     local state mute_suffix
+    # If both paused and idle-active came back empty, the IPC fetch
+    # failed (vs mpv answering "I'm idle" which would set idle=true).
+    if [ -z "$paused" ] && [ -z "$idle" ]; then
+        return 2
+    fi
     if [ -z "$paused" ] || [ "$idle" = "true" ]; then
         return 1
     fi
@@ -115,21 +126,38 @@ _render_channel() {
 # Format the active channel's state as one status-line string. Probes
 # tts → voice → music and short-circuits on the first non-idle one,
 # matching the popup's binding priority. Empty output when all channels
-# are idle (or "○" when HIDE_IDLE=0). Side-effect free.
+# are idle (or "○" when HIDE_IDLE=0).
+#
+# Exit codes (caller uses these to decide cache-vs-preserve):
+#   0 — committed result printed (non-empty render OR confirmed idle)
+#   2 — all probes failed; caller should keep the cached value rather
+#       than overwrite it with a blank, otherwise the status line
+#       visibly drops out during transient IPC blips
 render() {
-    local v
+    local v rc
+    local _saw_data=0
     # Try tts first (no channel prefix — keeps the historical look when
     # only tts is in use).
     mapfile -t v < <(_fetch_state "$_TTS_SOCK")
-    _render_channel "" "${v[@]:0:5}" && return 0
+    _render_channel "" "${v[@]:0:5}"; rc=$?
+    [ $rc -eq 0 ] && return 0
+    [ $rc -eq 1 ] && _saw_data=1
     # Then voice.
     mapfile -t v < <(_fetch_state "$_VOICE_SOCK")
-    _render_channel "[v] " "${v[@]:0:5}" && return 0
+    _render_channel "[v] " "${v[@]:0:5}"; rc=$?
+    [ $rc -eq 0 ] && return 0
+    [ $rc -eq 1 ] && _saw_data=1
     # Then music.
     mapfile -t v < <(_fetch_state "$_MUSIC_SOCK")
-    _render_channel "[m] " "${v[@]:0:5}" && return 0
+    _render_channel "[m] " "${v[@]:0:5}"; rc=$?
+    [ $rc -eq 0 ] && return 0
+    [ $rc -eq 1 ] && _saw_data=1
 
-    # All channels idle (or unreachable).
+    # No channel rendered. Distinguish "all definitely idle" (commit
+    # blank) from "all probes failed" (preserve previous cache).
+    if [ $_saw_data -eq 0 ]; then
+        return 2
+    fi
     [ "$HIDE_IDLE" = "1" ] && return 0
     printf '○'
 }
@@ -140,8 +168,12 @@ render() {
 refresh_cache() {
     (
         flock -n 9 || exit 0
-        local out
-        out=$(render) || exit 1
+        local out rc
+        out=$(render); rc=$?
+        # rc=2 means all probes failed — keep the existing cache rather
+        # than overwriting it with empty (which would visibly drop the
+        # bar from tmux's status-right during a transient blip).
+        [ $rc -eq 2 ] && exit 0
         printf '%s' "$out" > "$CACHE_FILE.tmp" 2>/dev/null \
             && mv -f "$CACHE_FILE.tmp" "$CACHE_FILE" 2>/dev/null
     ) 9>"$LOCK_FILE"
@@ -173,7 +205,11 @@ if [ -f "$CACHE_FILE" ]; then
 fi
 
 # First-ever invocation — no cache file yet. Synchronous fetch.
-out=$(render)
+out=$(render); rc=$?
 printf '%s' "$out"
-printf '%s' "$out" > "$CACHE_FILE.tmp" 2>/dev/null \
-    && mv -f "$CACHE_FILE.tmp" "$CACHE_FILE" 2>/dev/null
+# Don't seed an empty cache from a failed first probe — leave it
+# missing so the next invocation retries synchronously.
+if [ $rc -ne 2 ]; then
+    printf '%s' "$out" > "$CACHE_FILE.tmp" 2>/dev/null \
+        && mv -f "$CACHE_FILE.tmp" "$CACHE_FILE" 2>/dev/null
+fi
