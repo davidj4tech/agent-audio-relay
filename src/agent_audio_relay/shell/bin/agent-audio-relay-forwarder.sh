@@ -13,13 +13,13 @@
 #   RELAY_FWD_REMOTE        SSH alias of the playback host (default: p8ar)
 #   RELAY_FWD_REMOTE_BASE   Remote watch root, relative to ~ (default: .cache/agent-audio-relay)
 #   RELAY_FWD_WATCH_ROOTS   Space-separated drop dirs to watch
-#                           (default: /tmp/tts-claude /tmp/tts-codex /tmp/tts-opencode /tmp/tts-ha)
+#                           (default: /tmp/tts-claude /tmp/tts-codex /tmp/tts-opencode /tmp/tts-ha /tmp/tts-llm)
 
 set -u
 
 REMOTE="${RELAY_FWD_REMOTE:-p8ar}"
 REMOTE_BASE="${RELAY_FWD_REMOTE_BASE:-.cache/agent-audio-relay}"
-read -r -a WATCH_ROOTS <<< "${RELAY_FWD_WATCH_ROOTS:-/tmp/tts-claude /tmp/tts-codex /tmp/tts-opencode /tmp/tts-ha}"
+read -r -a WATCH_ROOTS <<< "${RELAY_FWD_WATCH_ROOTS:-/tmp/tts-claude /tmp/tts-codex /tmp/tts-opencode /tmp/tts-ha /tmp/tts-llm}"
 
 mkdir -p "${WATCH_ROOTS[@]}"
 
