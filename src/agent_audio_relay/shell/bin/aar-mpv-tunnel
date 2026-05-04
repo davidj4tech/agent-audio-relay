@@ -1,16 +1,21 @@
 #!/bin/bash
-# Persistent ssh unix-socket tunnel to the phone's mpv-tts IPC socket.
+# Persistent ssh unix-socket tunnel(s) to the phone's mpv IPC sockets.
 #
 # Why: every `tts-ctl` op and every `tts-popup` redraw otherwise forks a
 # fresh ssh process — which costs ~700ms per round-trip over Tailscale
 # (network + ssh handshake), and stalls indefinitely when the phone is
 # asleep. With this tunnel up, tts-ctl auto-discovers the local socket
-# (~/.local/state/agent-audio-relay/mpv-tts.sock by default) and uses
-# it via socat directly — latency is one network RTT (~110ms), and the
-# tunnel's keepalives keep Tailscale warm so the phone stays reachable.
+# (~/.local/state/agent-audio-relay/mpv-<channel>.sock by default) and
+# uses it via socat directly — latency is one network RTT (~110ms), and
+# the tunnel's keepalives keep Tailscale warm so the phone stays
+# reachable.
+#
+# Forwards three channels by default (tts, music, voice) over a single
+# ssh process with multiple -L flags. Any channel can be disabled by
+# setting its LOCAL or REMOTE override to the literal string "off".
 #
 # When the tunnel drops (phone deep sleep, network change), ssh exits;
-# this script removes the stale local socket and reconnects after a
+# this script removes the stale local sockets and reconnects after a
 # short backoff. tts-ctl then naturally falls back to its slower
 # ssh-fork path until the tunnel is back, so commands still work just
 # more slowly during reconnection.
@@ -18,36 +23,64 @@
 # Designed to run as a systemd user unit (see systemd/aar-mpv-tunnel.service).
 #
 # Env:
-#   AAR_MPV_TUNNEL_HOST     SSH alias of the phone (default: $CLAUDE_TTS_PHONE_HOST or p8ar)
-#   AAR_MPV_TUNNEL_LOCAL    Local unix socket path
-#                             (default: $XDG_STATE_HOME/agent-audio-relay/mpv-tts.sock)
-#   AAR_MPV_TUNNEL_REMOTE   Remote unix socket path on the phone
-#                             (default: /data/data/com.termux/files/usr/tmp/mpv-tts.sock)
-#   AAR_MPV_TUNNEL_BACKOFF  Seconds to wait between reconnection attempts (default: 3)
+#   AAR_MPV_TUNNEL_HOST          SSH alias of the phone (default: $CLAUDE_TTS_PHONE_HOST or p8ar)
+#   AAR_MPV_TUNNEL_BACKOFF       Seconds between reconnection attempts (default: 3)
+#
+#   Per-channel overrides (set either to "off" to disable that channel):
+#     AAR_MPV_TUNNEL_LOCAL       tts local socket  (default: $XDG_STATE_HOME/agent-audio-relay/mpv-tts.sock)
+#     AAR_MPV_TUNNEL_REMOTE      tts remote socket (default: /data/data/com.termux/files/usr/tmp/mpv-tts.sock)
+#     AAR_MPV_TUNNEL_MUSIC_LOCAL   default: ...mpv-music.sock
+#     AAR_MPV_TUNNEL_MUSIC_REMOTE  default: .../tmp/mpv-music.sock
+#     AAR_MPV_TUNNEL_VOICE_LOCAL   default: ...mpv-voice.sock
+#     AAR_MPV_TUNNEL_VOICE_REMOTE  default: .../tmp/mpv-voice.sock
 set -u
 
 REMOTE_HOST="${AAR_MPV_TUNNEL_HOST:-${CLAUDE_TTS_PHONE_HOST:-p8ar}}"
-LOCAL_SOCK="${AAR_MPV_TUNNEL_LOCAL:-${XDG_STATE_HOME:-$HOME/.local/state}/agent-audio-relay/mpv-tts.sock}"
-REMOTE_SOCK="${AAR_MPV_TUNNEL_REMOTE:-/data/data/com.termux/files/usr/tmp/mpv-tts.sock}"
 BACKOFF="${AAR_MPV_TUNNEL_BACKOFF:-3}"
 
-mkdir -p "$(dirname "$LOCAL_SOCK")"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/agent-audio-relay"
+REMOTE_DIR="/data/data/com.termux/files/usr/tmp"
+
+# AAR_MPV_TUNNEL_LOCAL/REMOTE retained as the tts pair for backward compat.
+TTS_LOCAL="${AAR_MPV_TUNNEL_LOCAL:-$STATE_DIR/mpv-tts.sock}"
+TTS_REMOTE="${AAR_MPV_TUNNEL_REMOTE:-$REMOTE_DIR/mpv-tts.sock}"
+MUSIC_LOCAL="${AAR_MPV_TUNNEL_MUSIC_LOCAL:-$STATE_DIR/mpv-music.sock}"
+MUSIC_REMOTE="${AAR_MPV_TUNNEL_MUSIC_REMOTE:-$REMOTE_DIR/mpv-music.sock}"
+VOICE_LOCAL="${AAR_MPV_TUNNEL_VOICE_LOCAL:-$STATE_DIR/mpv-voice.sock}"
+VOICE_REMOTE="${AAR_MPV_TUNNEL_VOICE_REMOTE:-$REMOTE_DIR/mpv-voice.sock}"
+
+mkdir -p "$STATE_DIR"
+
+LOCAL_SOCKS=()
+FORWARDS=()
+for pair in "$TTS_LOCAL:$TTS_REMOTE" "$MUSIC_LOCAL:$MUSIC_REMOTE" "$VOICE_LOCAL:$VOICE_REMOTE"; do
+    local_sock="${pair%%:*}"
+    remote_sock="${pair#*:}"
+    [ "$local_sock" = "off" ] && continue
+    [ "$remote_sock" = "off" ] && continue
+    LOCAL_SOCKS+=("$local_sock")
+    FORWARDS+=(-L "${local_sock}:${remote_sock}")
+done
+
+if [ ${#FORWARDS[@]} -eq 0 ]; then
+    echo "[aar-mpv-tunnel] all channels disabled, exiting" >&2
+    exit 0
+fi
 
 cleanup() {
-    rm -f "$LOCAL_SOCK"
+    for s in "${LOCAL_SOCKS[@]}"; do rm -f "$s"; done
     exit 0
 }
 trap cleanup INT TERM HUP
 
-echo "[aar-mpv-tunnel] $LOCAL_SOCK -> $REMOTE_HOST:$REMOTE_SOCK" >&2
+echo "[aar-mpv-tunnel] forwarding ${#LOCAL_SOCKS[@]} socket(s) to $REMOTE_HOST:" >&2
+for s in "${LOCAL_SOCKS[@]}"; do echo "  $s" >&2; done
 
 while true; do
     # StreamLocalBindUnlink: have ssh remove a stale local socket before
     # binding (otherwise it errors on EADDRINUSE after a crash).
     # ServerAlive*: detect dead links in ~30s without waiting for TCP timeout.
-    # ExitOnForwardFailure: bail immediately if the forward can't be set up
-    # (e.g. local-socket bind error), so we don't sit in a half-connected
-    # ssh thinking we're forwarding when we're not.
+    # ExitOnForwardFailure: bail immediately if any forward can't be set up.
     # ControlPath=none: bypass any existing user-level ssh ControlMaster for
     # this host. With it, `ssh -N -L` would otherwise attach as a slave to
     # the existing master, immediately exit (the slave has no command
@@ -55,7 +88,7 @@ while true; do
     # would just spin in a reconnect loop without ever establishing a
     # working unix socket.
     ssh -N \
-        -L "${LOCAL_SOCK}:${REMOTE_SOCK}" \
+        "${FORWARDS[@]}" \
         -o BatchMode=yes \
         -o ConnectTimeout=10 \
         -o ServerAliveInterval=15 \
@@ -65,7 +98,7 @@ while true; do
         -o ControlPath=none \
         "$REMOTE_HOST" 2>&1
     rc=$?
-    rm -f "$LOCAL_SOCK"
+    for s in "${LOCAL_SOCKS[@]}"; do rm -f "$s"; done
     echo "[aar-mpv-tunnel] ssh exited rc=$rc; reconnecting in ${BACKOFF}s" >&2
     sleep "$BACKOFF"
 done

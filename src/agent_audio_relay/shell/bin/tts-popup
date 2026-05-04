@@ -81,18 +81,71 @@ fi
 # pays a fresh ssh handshake. If the user's ssh config already provides
 # a working ControlMaster for the phone host, reuse it (do nothing).
 # Otherwise open one for the popup's lifetime.
-# Socket auto-discovery (mirrors tts-ctl): prefer an explicit MPV_TTS_SOCK,
-# otherwise the tunnel socket from `aar-mpv-tunnel` if present, otherwise
-# the on-phone Termux path. When the tunnel socket exists locally, the
-# rest of this block (ad-hoc ControlMaster setup) is unnecessary.
-_default_local_sock="${XDG_STATE_HOME:-$HOME/.local/state}/agent-audio-relay/mpv-tts.sock"
-if [ -n "${MPV_TTS_SOCK:-}" ]; then
+#
+# Channel discovery: the popup binds to one of three mpv channels (tts,
+# voice, music). Selection priority:
+#   1. AAR_MPV_SOCKET / MPV_TTS_SOCK env (caller knows what they want)
+#   2. probe each tunnel socket's idle-active; pick the first non-idle
+#      in priority order tts > voice > music (tts is most ephemeral and
+#      almost always what the user wants to interact with; voice >
+#      music because voice ducks/pauses for tts, so it's the foreground
+#      content when both are loaded)
+#   3. fall back to tts (preserves the historical default)
+# The probe is three local socat calls (~30ms total when the tunnel is
+# up) and runs once at popup startup — not refreshed mid-popup.
+_state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/agent-audio-relay"
+_tts_sock="$_state_dir/mpv-tts.sock"
+_voice_sock="$_state_dir/mpv-voice.sock"
+_music_sock="$_state_dir/mpv-music.sock"
+_phone_tts_sock="/data/data/com.termux/files/usr/tmp/mpv-tts.sock"
+
+_probe_idle() {
+    # Returns "active", "idle", or "unknown" for the given socket.
+    local sock="$1" r
+    [ -S "$sock" ] || { printf 'unknown'; return; }
+    r=$(printf '%s\n' '{"command":["get_property","idle-active"]}' \
+        | socat -T 1 - "UNIX-CONNECT:$sock" 2>/dev/null \
+        | jq -r 'select(.error=="success")|.data' 2>/dev/null | head -n1)
+    case "$r" in
+        true)  printf 'idle' ;;
+        false) printf 'active' ;;
+        *)     printf 'unknown' ;;
+    esac
+}
+
+CHANNEL="tts"
+if [ -n "${AAR_MPV_SOCKET:-}" ]; then
+    _SOCK="$AAR_MPV_SOCKET"
+    case "$_SOCK" in
+        *mpv-music.sock) CHANNEL="music" ;;
+        *mpv-voice.sock) CHANNEL="voice" ;;
+    esac
+elif [ -n "${MPV_TTS_SOCK:-}" ]; then
     _SOCK="$MPV_TTS_SOCK"
-elif [ -S "$_default_local_sock" ]; then
-    _SOCK="$_default_local_sock"
+elif [ -S "$_tts_sock" ] || [ -S "$_voice_sock" ] || [ -S "$_music_sock" ]; then
+    # Tunnel sockets exist — probe them in priority order.
+    if [ "$(_probe_idle "$_tts_sock")" = "active" ]; then
+        _SOCK="$_tts_sock"; CHANNEL="tts"
+    elif [ "$(_probe_idle "$_voice_sock")" = "active" ]; then
+        _SOCK="$_voice_sock"; CHANNEL="voice"
+    elif [ "$(_probe_idle "$_music_sock")" = "active" ]; then
+        _SOCK="$_music_sock"; CHANNEL="music"
+    elif [ -S "$_tts_sock" ]; then
+        _SOCK="$_tts_sock"; CHANNEL="tts"
+    elif [ -S "$_voice_sock" ]; then
+        _SOCK="$_voice_sock"; CHANNEL="voice"
+    else
+        _SOCK="$_music_sock"; CHANNEL="music"
+    fi
 else
-    _SOCK="/data/data/com.termux/files/usr/tmp/mpv-tts.sock"
+    _SOCK="$_phone_tts_sock"
 fi
+
+# All tts-ctl invocations route through ctl() so the chosen socket flows
+# everywhere (including the background state fetcher) without sprinkling
+# --socket flags through every dispatch line.
+TTS_CTL_OPTS=(--socket "$_SOCK")
+ctl() { "$TTS_CTL" "${TTS_CTL_OPTS[@]}" "$@"; }
 _CTL_DIR=""
 _CTL_PATH=""
 _PHONE_HOST=""
@@ -247,10 +300,24 @@ draw() {
             # mpv is idle — surface the session this popup is pinned to so
             # the user knows what Space-after-idle will load.
             [ -n "$SESSION" ] && label="(idle: $SESSION)" || label="(idle)"
-        else
+        elif [ "$CHANNEL" = "tts" ]; then
             label=$(nowplaying_label "$path")
+        else
+            # music/voice clips don't follow the tts stem format, so use
+            # the file basename (sans ext) as a best-effort title.
+            local _b="${path##*/}"
+            label="${_b%.*}"
         fi
     fi
+    # Channel marker — empty for tts (the historical default look) so
+    # popups that only ever drive tts visually don't change. `[v]`/`[m]`
+    # for the new channels so the user can tell which channel they're
+    # controlling at a glance.
+    local channel_prefix=""
+    case "$CHANNEL" in
+        voice) channel_prefix="[v] " ;;
+        music) channel_prefix="[m] " ;;
+    esac
     local mute_suffix=""
     [ "$mute" = "true" ] && mute_suffix=' [M]'
     # Briefly show the last keypress for visual feedback. Cleared once
@@ -274,7 +341,7 @@ draw() {
     # One-line layout. \033[K erases any prior-frame residue; \033[J
     # below wipes anything that was drawn on lines 2+ by an older popup.
     local frame=$'\033[H'
-    frame+="${state} ${label}${mute_suffix}${key_suffix}"
+    frame+="${state} ${channel_prefix}${label}${mute_suffix}${key_suffix}"
     frame+=$'\033[K\033[J'
     # Only emit if the rendered output changed. Bar cells only cross a
     # boundary every ~(duration/width) seconds, but draw() runs every
@@ -316,7 +383,7 @@ declare -a STATE
 # per REFRESH.
 _refetch_state() {
     {
-        "$TTS_CTL" get pause idle-active time-pos duration volume path mute \
+        ctl get pause idle-active time-pos duration volume path mute \
             && date +%s.%N
     } > "$STATE_FILE.tmp" 2>/dev/null \
         && mv -f "$STATE_FILE.tmp" "$STATE_FILE" 2>/dev/null
@@ -398,36 +465,36 @@ while true; do
     # picks up the resulting state change. We also set LAST_KEY so the
     # next draw can show a brief "you pressed X" indicator.
     case "$key" in
-        ' '|p) "$TTS_CTL" toggle "$SESSION" >/dev/null 2>&1 & disown
+        ' '|p) ctl toggle "$SESSION" >/dev/null 2>&1 & disown
              LOAD_PENDING_SINCE=$SECONDS; LAST_KEY="space" ;;
-        r)   "$TTS_CTL" replay "$SESSION" >/dev/null 2>&1 & disown
+        r)   ctl replay "$SESSION" >/dev/null 2>&1 & disown
              LOAD_PENDING_SINCE=$SECONDS; LAST_KEY="replay" ;;
-        0)   "$TTS_CTL" start    >/dev/null 2>&1 & disown; LAST_KEY="start" ;;
-        h)   "$TTS_CTL" seek -5  >/dev/null 2>&1 & disown; LAST_KEY="-5s" ;;
-        l)   "$TTS_CTL" seek 5   >/dev/null 2>&1 & disown; LAST_KEY="+5s" ;;
-        H)   "$TTS_CTL" seek -30 >/dev/null 2>&1 & disown; LAST_KEY="-30s" ;;
-        L)   "$TTS_CTL" seek 30  >/dev/null 2>&1 & disown; LAST_KEY="+30s" ;;
-        '-') "$TTS_CTL" volume -5 >/dev/null 2>&1 & disown; LAST_KEY="vol-" ;;
-        '=') "$TTS_CTL" volume 5  >/dev/null 2>&1 & disown; LAST_KEY="vol+" ;;
-        m)   "$TTS_CTL" mute     >/dev/null 2>&1 & disown; LAST_KEY="mute" ;;
-        '[') "$TTS_CTL" slower   >/dev/null 2>&1 & disown; LAST_KEY="slower" ;;
-        ']') "$TTS_CTL" faster   >/dev/null 2>&1 & disown; LAST_KEY="faster" ;;
-        '<') "$TTS_CTL" prev "$SESSION" >/dev/null 2>&1 & disown
+        0)   ctl start    >/dev/null 2>&1 & disown; LAST_KEY="start" ;;
+        h)   ctl seek -5  >/dev/null 2>&1 & disown; LAST_KEY="-5s" ;;
+        l)   ctl seek 5   >/dev/null 2>&1 & disown; LAST_KEY="+5s" ;;
+        H)   ctl seek -30 >/dev/null 2>&1 & disown; LAST_KEY="-30s" ;;
+        L)   ctl seek 30  >/dev/null 2>&1 & disown; LAST_KEY="+30s" ;;
+        '-') ctl volume -5 >/dev/null 2>&1 & disown; LAST_KEY="vol-" ;;
+        '=') ctl volume 5  >/dev/null 2>&1 & disown; LAST_KEY="vol+" ;;
+        m)   ctl mute     >/dev/null 2>&1 & disown; LAST_KEY="mute" ;;
+        '[') ctl slower   >/dev/null 2>&1 & disown; LAST_KEY="slower" ;;
+        ']') ctl faster   >/dev/null 2>&1 & disown; LAST_KEY="faster" ;;
+        '<') ctl prev "$SESSION" >/dev/null 2>&1 & disown
              LOAD_PENDING_SINCE=$SECONDS; LAST_KEY="prev" ;;
-        '>') "$TTS_CTL" next "$SESSION" >/dev/null 2>&1 & disown
+        '>') ctl next "$SESSION" >/dev/null 2>&1 & disown
              LOAD_PENDING_SINCE=$SECONDS; LAST_KEY="next" ;;
-        DELETE|$'\b'|$'\x7f') "$TTS_CTL" speed 1 >/dev/null 2>&1 & disown; LAST_KEY="speed=1" ;;
+        DELETE|$'\b'|$'\x7f') ctl speed 1 >/dev/null 2>&1 & disown; LAST_KEY="speed=1" ;;
         # mpv/VLC convention: digits 1-9 jump to N×10% of the clip.
         # 0 stays as seek-to-start (which is also 0% — consistent).
-        1) "$TTS_CTL" seek-percent 10 >/dev/null 2>&1 & disown; LAST_KEY="10%" ;;
-        2) "$TTS_CTL" seek-percent 20 >/dev/null 2>&1 & disown; LAST_KEY="20%" ;;
-        3) "$TTS_CTL" seek-percent 30 >/dev/null 2>&1 & disown; LAST_KEY="30%" ;;
-        4) "$TTS_CTL" seek-percent 40 >/dev/null 2>&1 & disown; LAST_KEY="40%" ;;
-        5) "$TTS_CTL" seek-percent 50 >/dev/null 2>&1 & disown; LAST_KEY="50%" ;;
-        6) "$TTS_CTL" seek-percent 60 >/dev/null 2>&1 & disown; LAST_KEY="60%" ;;
-        7) "$TTS_CTL" seek-percent 70 >/dev/null 2>&1 & disown; LAST_KEY="70%" ;;
-        8) "$TTS_CTL" seek-percent 80 >/dev/null 2>&1 & disown; LAST_KEY="80%" ;;
-        9) "$TTS_CTL" seek-percent 90 >/dev/null 2>&1 & disown; LAST_KEY="90%" ;;
+        1) ctl seek-percent 10 >/dev/null 2>&1 & disown; LAST_KEY="10%" ;;
+        2) ctl seek-percent 20 >/dev/null 2>&1 & disown; LAST_KEY="20%" ;;
+        3) ctl seek-percent 30 >/dev/null 2>&1 & disown; LAST_KEY="30%" ;;
+        4) ctl seek-percent 40 >/dev/null 2>&1 & disown; LAST_KEY="40%" ;;
+        5) ctl seek-percent 50 >/dev/null 2>&1 & disown; LAST_KEY="50%" ;;
+        6) ctl seek-percent 60 >/dev/null 2>&1 & disown; LAST_KEY="60%" ;;
+        7) ctl seek-percent 70 >/dev/null 2>&1 & disown; LAST_KEY="70%" ;;
+        8) ctl seek-percent 80 >/dev/null 2>&1 & disown; LAST_KEY="80%" ;;
+        9) ctl seek-percent 90 >/dev/null 2>&1 & disown; LAST_KEY="90%" ;;
         i)
             # Clip info dump in the tmux status line. Reads cached state
             # so this doesn't add an IPC round-trip.
