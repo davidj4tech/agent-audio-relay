@@ -37,6 +37,14 @@ CACHE_FILE="$CACHE_DIR/status-line.cache"
 LOCK_FILE="$CACHE_FILE.lock"
 mkdir -p "$CACHE_DIR" 2>/dev/null
 
+# Channel sockets — same set the popup probes. Priority order tts > voice
+# > music, matching the popup so the status-line and popup always agree
+# on which channel is "active enough" to surface.
+_state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/agent-audio-relay"
+_TTS_SOCK="$_state_dir/mpv-tts.sock"
+_VOICE_SOCK="$_state_dir/mpv-voice.sock"
+_MUSIC_SOCK="$_state_dir/mpv-music.sock"
+
 fmt_time() {
     local t="$1"
     if [ -z "$t" ] || [ "$t" = "null" ]; then
@@ -68,36 +76,55 @@ bar() {
     printf '%s%s' "$fill" "$rest"
 }
 
-# Format the current mpv state as one status-line string. Empty output
-# when idle (or "○" when HIDE_IDLE=0). Side-effect free.
-render() {
-    local v paused idle pos dur mute state mute_suffix
-    mapfile -t v < <("$TTS_CTL" get pause idle-active time-pos duration mute 2>/dev/null)
-    paused="${v[0]:-}"
-    idle="${v[1]:-}"
-    pos="${v[2]:-}"
-    dur="${v[3]:-}"
-    mute="${v[4]:-}"
+# Fetch full state for one channel via tts-ctl --socket. Echoes the five
+# props on stdout, one per line (matching mapfile expectations below).
+_fetch_state() {
+    "$TTS_CTL" --socket "$1" get pause idle-active time-pos duration mute 2>/dev/null
+}
 
+# Render one channel's state as a status-line string given the channel's
+# prefix and pre-fetched state lines. Returns non-zero if the channel is
+# idle (so the caller can try the next channel).
+_render_channel() {
+    local prefix="$1"; shift
+    local paused="${1:-}" idle="${2:-}" pos="${3:-}" dur="${4:-}" mute="${5:-}"
+    local state mute_suffix
     if [ "$idle" = "true" ] || [ -z "$paused" ]; then
-        [ "$HIDE_IDLE" = "1" ] && return 0
-        printf '○'
-        return 0
+        return 1
     fi
-
-    if [ "$paused" = "true" ]; then
-        state='⏸'
-    else
-        state='▶'
-    fi
+    if [ "$paused" = "true" ]; then state='⏸'; else state='▶'; fi
     mute_suffix=""
     [ "$mute" = "true" ] && mute_suffix=' [M]'
-    printf '%s %s %s %s%s' \
+    printf '%s%s %s %s %s%s' \
+        "$prefix" \
         "$state" \
         "$(fmt_time "$pos")" \
         "$(bar "$pos" "$dur" "$BAR_WIDTH")" \
         "$(fmt_time "$dur")" \
         "$mute_suffix"
+    return 0
+}
+
+# Format the active channel's state as one status-line string. Probes
+# tts → voice → music and short-circuits on the first non-idle one,
+# matching the popup's binding priority. Empty output when all channels
+# are idle (or "○" when HIDE_IDLE=0). Side-effect free.
+render() {
+    local v
+    # Try tts first (no channel prefix — keeps the historical look when
+    # only tts is in use).
+    mapfile -t v < <(_fetch_state "$_TTS_SOCK")
+    _render_channel "" "${v[@]:0:5}" && return 0
+    # Then voice.
+    mapfile -t v < <(_fetch_state "$_VOICE_SOCK")
+    _render_channel "[v] " "${v[@]:0:5}" && return 0
+    # Then music.
+    mapfile -t v < <(_fetch_state "$_MUSIC_SOCK")
+    _render_channel "[m] " "${v[@]:0:5}" && return 0
+
+    # All channels idle (or unreachable).
+    [ "$HIDE_IDLE" = "1" ] && return 0
+    printf '○'
 }
 
 # Refresh the cache file. flock prevents pile-ups when many tmux
