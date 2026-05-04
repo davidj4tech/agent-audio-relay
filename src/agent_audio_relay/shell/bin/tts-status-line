@@ -84,21 +84,28 @@ _fetch_state() {
 
 # Render one channel's state as a status-line string given the channel's
 # prefix and pre-fetched state lines. Returns non-zero if the channel is
-# idle (so the caller can try the next channel).
+# idle OR the fetch failed (paused empty = no data, distinguishable from
+# paused="false" = playing) so the caller can try the next channel
+# without rendering a phantom empty frame.
+#
+# Note: live position is *not* included in the rendered string — only
+# duration. This keeps tmux from repainting status-right every second
+# (which reads as a slow flash, since each repaint clears+rewrites the
+# whole region). The bar advances visually whenever a cell boundary is
+# crossed, which is the only time the rendered string actually changes.
 _render_channel() {
     local prefix="$1"; shift
     local paused="${1:-}" idle="${2:-}" pos="${3:-}" dur="${4:-}" mute="${5:-}"
     local state mute_suffix
-    if [ "$idle" = "true" ] || [ -z "$paused" ]; then
+    if [ -z "$paused" ] || [ "$idle" = "true" ]; then
         return 1
     fi
     if [ "$paused" = "true" ]; then state='⏸'; else state='▶'; fi
     mute_suffix=""
     [ "$mute" = "true" ] && mute_suffix=' [M]'
-    printf '%s%s %s %s %s%s' \
+    printf '%s%s %s %s%s' \
         "$prefix" \
         "$state" \
-        "$(fmt_time "$pos")" \
         "$(bar "$pos" "$dur" "$BAR_WIDTH")" \
         "$(fmt_time "$dur")" \
         "$mute_suffix"
