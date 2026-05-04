@@ -114,38 +114,59 @@ _probe_idle() {
 }
 
 CHANNEL="tts"
-if [ -n "${AAR_MPV_SOCKET:-}" ]; then
-    _SOCK="$AAR_MPV_SOCKET"
-    case "$_SOCK" in
-        *mpv-music.sock) CHANNEL="music" ;;
-        *mpv-voice.sock) CHANNEL="voice" ;;
-    esac
-elif [ -n "${MPV_TTS_SOCK:-}" ]; then
-    _SOCK="$MPV_TTS_SOCK"
-elif [ -S "$_tts_sock" ] || [ -S "$_voice_sock" ] || [ -S "$_music_sock" ]; then
-    # Tunnel sockets exist — probe them in priority order.
-    if [ "$(_probe_idle "$_tts_sock")" = "active" ]; then
-        _SOCK="$_tts_sock"; CHANNEL="tts"
-    elif [ "$(_probe_idle "$_voice_sock")" = "active" ]; then
-        _SOCK="$_voice_sock"; CHANNEL="voice"
-    elif [ "$(_probe_idle "$_music_sock")" = "active" ]; then
-        _SOCK="$_music_sock"; CHANNEL="music"
-    elif [ -S "$_tts_sock" ]; then
-        _SOCK="$_tts_sock"; CHANNEL="tts"
-    elif [ -S "$_voice_sock" ]; then
-        _SOCK="$_voice_sock"; CHANNEL="voice"
-    else
-        _SOCK="$_music_sock"; CHANNEL="music"
-    fi
-else
-    _SOCK="$_phone_tts_sock"
-fi
+_SOCK=""
 
-# All tts-ctl invocations route through ctl() so the chosen socket flows
-# everywhere (including the background state fetcher) without sprinkling
-# --socket flags through every dispatch line.
-TTS_CTL_OPTS=(--socket "$_SOCK")
-ctl() { "$TTS_CTL" "${TTS_CTL_OPTS[@]}" "$@"; }
+# _select_channel: refresh _SOCK + CHANNEL based on the current state
+# of the three channel sockets. Called at startup, then again before
+# every keypress so a stream that starts after the popup opens still
+# routes Space/seek/etc. to the right mpv. ~30-90ms total over the
+# tunnel — well under any human-perceptible keypress floor.
+#
+# Honors AAR_MPV_SOCKET / MPV_TTS_SOCK as a sticky pin if the user
+# explicitly chose a channel; without those, picks the first non-idle
+# in priority order tts > voice > music.
+_select_channel() {
+    if [ -n "${AAR_MPV_SOCKET:-}" ]; then
+        _SOCK="$AAR_MPV_SOCKET"
+        case "$_SOCK" in
+            *mpv-music.sock) CHANNEL="music" ;;
+            *mpv-voice.sock) CHANNEL="voice" ;;
+            *) CHANNEL="tts" ;;
+        esac
+        return
+    fi
+    if [ -n "${MPV_TTS_SOCK:-}" ]; then
+        _SOCK="$MPV_TTS_SOCK"; CHANNEL="tts"
+        return
+    fi
+    if [ -S "$_tts_sock" ] || [ -S "$_voice_sock" ] || [ -S "$_music_sock" ]; then
+        if [ "$(_probe_idle "$_tts_sock")" = "active" ]; then
+            _SOCK="$_tts_sock"; CHANNEL="tts"
+        elif [ "$(_probe_idle "$_voice_sock")" = "active" ]; then
+            _SOCK="$_voice_sock"; CHANNEL="voice"
+        elif [ "$(_probe_idle "$_music_sock")" = "active" ]; then
+            _SOCK="$_music_sock"; CHANNEL="music"
+        elif [ -S "$_tts_sock" ]; then
+            _SOCK="$_tts_sock"; CHANNEL="tts"
+        elif [ -S "$_voice_sock" ]; then
+            _SOCK="$_voice_sock"; CHANNEL="voice"
+        else
+            _SOCK="$_music_sock"; CHANNEL="music"
+        fi
+        return
+    fi
+    _SOCK="$_phone_tts_sock"; CHANNEL="tts"
+}
+
+_select_channel
+
+# All tts-ctl invocations route through ctl(), which re-reads $_SOCK
+# every call so a mid-popup channel-rebind (via _select_channel) takes
+# effect immediately for both the background fetcher and keypress
+# actions. Without the rebind, the popup pinned to whichever channel
+# was non-idle at startup — opening before a stream started meant
+# Space/seek hit the wrong mpv for the entire popup lifetime.
+ctl() { "$TTS_CTL" --socket "$_SOCK" "$@"; }
 _CTL_DIR=""
 _CTL_PATH=""
 _PHONE_HOST=""
@@ -464,6 +485,12 @@ while true; do
     # on an ssh RTT. The next periodic fetch (or the explicit refetch below)
     # picks up the resulting state change. We also set LAST_KEY so the
     # next draw can show a brief "you pressed X" indicator.
+    #
+    # Re-probe channel selection on every keypress so a stream that
+    # started after the popup opened still gets routed correctly. The
+    # background fetcher uses whatever _SOCK is current on its next
+    # tick — no extra wiring needed.
+    _select_channel
     case "$key" in
         ' '|p) ctl toggle "$SESSION" >/dev/null 2>&1 & disown
              LOAD_PENDING_SINCE=$SECONDS; LAST_KEY="space" ;;
