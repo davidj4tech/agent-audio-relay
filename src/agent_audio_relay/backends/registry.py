@@ -27,7 +27,7 @@ from typing import Tuple
 from .base import PlaybackBackend
 
 KNOWN_BACKENDS = ("ssh-termux", "mpv")
-DEFAULT_BACKEND = "ssh-termux"
+DEFAULT_BACKEND = "mpv"
 
 
 def _default_control_file() -> Path:

@@ -526,18 +526,35 @@ tts-ctl toggle           # cycle pause if the right clip is loaded;
                          #   reload the session's latest if it isn't
 tts-ctl replay [session] # reload+play this session's latest clip
                          #   (no global fallback — session is honored)
+tts-ctl prev|next [sess] # walk this session's archive by mtime
+tts-ctl playlist-prev    # mpv playlist-prev (music/voice channels)
+tts-ctl playlist-next    # mpv playlist-next
 tts-ctl seek 5           # relative seek (negative = backwards)
+tts-ctl seek-percent 50  # absolute-percent seek
 tts-ctl start            # seek to 0 (replay current clip from start)
 tts-ctl volume -5        # add to mpv volume
 tts-ctl mute             # toggle mute
+tts-ctl slower|faster    # speed × 0.91 / × 1.1
+tts-ctl speed 1          # set speed
 tts-ctl status           # state + position/duration + volume
 tts-ctl nowplaying       # current file path
 tts-ctl get PROP...      # one IPC round-trip; one line per property
 ```
 
+**Channels.** mpv-mcp on the phone runs three independent mpv instances
+— `mpv-tts` (agent voice, baseline volume 100), `mpv-voice`
+(audiobooks/podcasts, baseline 85, paused while tts plays), and
+`mpv-music` (background music, baseline 50). `tts-ctl` defaults to the
+tts socket; pass `--socket PATH` (or set `AAR_MPV_SOCKET`) to drive
+the music or voice channel instead. Archive-aware ops (`replay`,
+`prev`, `next`, the session-pinned reload in `toggle`) are only
+meaningful for tts — on music/voice they degrade to cycle-pause / no-op
+since no archived clip will match.
+
 Required on the phone: `mpv`, `socat`, `jq`, and an mpv daemon launched
 with `--input-ipc-server=$PREFIX/tmp/mpv-tts.sock --idle=yes`. Override
-the socket with `MPV_TTS_SOCK` if your daemon binds elsewhere.
+the socket with `AAR_MPV_SOCKET` if your daemon binds elsewhere
+(legacy `MPV_TTS_SOCK` is still honored).
 
 The companion project [mpv-mcp](https://github.com/davidj4tech/mpv-mcp)
 (Node, runs in Termux) provisions both `mpv` channels as runit services,
@@ -567,11 +584,22 @@ session. Without it, `display-popup -E` doesn't reliably propagate
 
 Hotkeys inside the interactive popup: `Space` reload-or-toggle (loads
 this session's latest if a different clip is loaded; otherwise cycles
-pause), `r` replay, `0` seek to start, `h`/`l` seek ±5s, `H`/`L` seek
-±30s, `-`/`=` volume ±5, `m` mute toggle, `q` (or `Esc`) close. The
+pause), `r` replay (or restart-current on music/voice), `0` seek to
+start, `h`/`l` seek ±5s, `H`/`L` seek ±30s, `1`–`9` seek to N×10%,
+`-`/`=` volume ±5, `m` mute toggle, `[`/`]` slower/faster, `<`/`>`
+prev/next clip in this session's archive (or `playlist-prev`/`-next`
+on music/voice), `i` clip info, `?` keymap, `q` (or `Esc`) close. The
 popup auto-closes `TTS_POPUP_AUTO_CLOSE` seconds after playback ends
 (default 10, set to 0 to disable). Width is given as a percentage so
 the popup fits on narrow displays (Termux on a phone).
+
+**Channel binding.** At startup the popup probes the three channel
+sockets (tts, voice, music) and binds to whichever is currently
+non-idle, in priority order tts > voice > music; falls back to tts
+when all are idle. The label gets a `[v]`/`[m]` prefix on voice/music
+so you can see at a glance which channel the popup is driving. tts
+looks unchanged when only tts is in use. Override with
+`AAR_MPV_SOCKET=/path/to/sock` to pin the popup to a specific channel.
 
 ### As a tmux plugin (TPM)
 
@@ -604,8 +632,11 @@ instead.
 
 For an always-on display that doesn't take a popup, add `tts-status-line`
 to your tmux `status-right`. It prints a compact one-liner while a clip
-is loaded and emits nothing when mpv is idle, so your normal clock /
-date / battery / whatever shows through unchanged the rest of the time.
+is loaded and emits nothing when all channels are idle, so your normal
+clock / date / battery / whatever shows through unchanged the rest of
+the time. Like the popup it probes tts > voice > music and renders
+whichever is non-idle, with a `[v]`/`[m]` prefix on the non-tts
+channels.
 
 ```tmux
 set -g status-interval 1
