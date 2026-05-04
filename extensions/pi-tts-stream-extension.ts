@@ -21,16 +21,37 @@
  * Env vars:
  *   PI_TTS_STREAM_ENABLED  "0" disables (default: enabled)
  *   PI_TTS_STREAM_BIN      tts-stream binary (default: tts-stream from PATH)
+ *   PI_TTS_STREAM_ENGINE   Override engine for this extension only
+ *                          (edge|openai|qwen). Maps to RELAY_TTS_ENGINE
+ *                          in the spawned subprocess so it can differ
+ *                          from your shell-wide default. Useful when
+ *                          you want pi to use qwen but llm to use openai.
+ *   PI_TTS_STREAM_VOICE    Override voice (engine-specific name)
+ *   PI_TTS_STREAM_DEBUG    "1" logs spawn args + per-delta byte counts
+ *                          to ~/logs/pi-tts-stream-debug.log
  *
- * Engine + voice configuration is inherited via tts-stream's own env
- * vars (RELAY_TTS_ENGINE, RELAY_OPENAI_VOICE, RELAY_QWEN_VOICE,
- * DASHSCOPE_API_KEY, OPENAI_API_KEY, etc.). See the tts-stream README
- * section for the full list — the goal here is to NOT duplicate engine
- * config in two places.
+ * All other engine/voice/key config is inherited via tts-stream's own
+ * env vars (RELAY_TTS_ENGINE, RELAY_OPENAI_VOICE, RELAY_QWEN_VOICE,
+ * DASHSCOPE_API_KEY, OPENAI_API_KEY, etc.) — the PI_TTS_STREAM_*
+ * overrides above only kick in when set.
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { spawn, type ChildProcess } from "node:child_process";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { homedir } from "node:os";
+
+const DEBUG_LOG = join(homedir(), "logs", "pi-tts-stream-debug.log");
+function dbg(msg: string): void {
+	if (process.env.PI_TTS_STREAM_DEBUG !== "1") return;
+	try {
+		mkdirSync(dirname(DEBUG_LOG), { recursive: true });
+		appendFileSync(DEBUG_LOG, `[${new Date().toISOString()}] ${msg}\n`);
+	} catch {
+		/* swallow — logging must never break the agent */
+	}
+}
 
 // One active tts-stream subprocess per pi turn. Concurrent assistant
 // messages are unusual in pi (one model response per user turn), but
@@ -70,9 +91,25 @@ export default function (pi: ExtensionAPI) {
 			// --no-tee because pi already prints the assistant text in
 			// its own TUI; teeing through tts-stream would duplicate.
 			const args = ["--no-tee"];
+			// Build subprocess env with optional pi-specific engine/voice
+			// overrides. PI_TTS_STREAM_* takes precedence over inherited
+			// RELAY_* so the user can keep llm on openai while pi uses
+			// qwen, for instance.
+			const env: NodeJS.ProcessEnv = { ...process.env };
+			if (process.env.PI_TTS_STREAM_ENGINE) {
+				env.RELAY_TTS_ENGINE = process.env.PI_TTS_STREAM_ENGINE;
+			}
+			if (process.env.PI_TTS_STREAM_VOICE) {
+				// Each engine has its own voice env, so set them all —
+				// only the engine actually used picks its own up.
+				env.RELAY_EDGE_VOICE = process.env.PI_TTS_STREAM_VOICE;
+				env.RELAY_OPENAI_VOICE = process.env.PI_TTS_STREAM_VOICE;
+				env.RELAY_QWEN_VOICE = process.env.PI_TTS_STREAM_VOICE;
+			}
+			dbg(`spawn ${bin} ${args.join(" ")} engine=${env.RELAY_TTS_ENGINE || "(default)"} voice=${process.env.PI_TTS_STREAM_VOICE || "(default)"}`);
 			active = spawn(bin, args, {
 				stdio: ["pipe", "ignore", "ignore"],
-				env: process.env,
+				env,
 			});
 			active.on("error", () => {
 				active = null;
@@ -97,6 +134,7 @@ export default function (pi: ExtensionAPI) {
 		// handled by tts-stream's segmenter so we don't need to
 		// pre-filter here.
 		if (!e || e.type !== "text_delta" || typeof e.delta !== "string") return;
+		dbg(`delta ${e.delta.length}b idx=${e.contentIndex} ${JSON.stringify(e.delta.slice(0, 30))}`);
 		try {
 			active.stdin.write(e.delta);
 		} catch {
@@ -105,6 +143,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("message_end", (_event: any, _ctx) => {
+		dbg("message_end");
 		endActive();
 	});
 }
