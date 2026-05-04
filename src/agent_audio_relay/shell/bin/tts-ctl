@@ -216,6 +216,34 @@ case "${1:-}" in
     pause)   mpv_cmd '{"command":["set_property","pause",true]}'  >/dev/null ;;
     resume)  mpv_cmd '{"command":["set_property","pause",false]}' >/dev/null ;;
     toggle)
+        # Voice/music channels: session-pinned archive reload is a
+        # tts-only concept (those channels don't have per-session
+        # archived clips parsed by stem). For these channels:
+        #   - if mpv has something loaded (playing or paused), cycle
+        #     pause — Space toggles play/pause naturally.
+        #   - if mpv is genuinely idle (stream finished, nothing loaded),
+        #     fall through to the tts-style replay logic so Space
+        #     restarts the most recent archived clip for the session.
+        # The earlier bug was that when a finished stream left mpv
+        # idle, ANY Space press triggered the reload — which from the
+        # user's perspective looked like "Space resets to start instead
+        # of pausing" because they'd hit Space mid-playback and the
+        # logic raced with the cache draining.
+        case "$SOCK" in
+            *mpv-voice.sock*|*mpv-music.sock*)
+                _vmstate=$(mpv_batch_get idle-active path | head -2 | tr '\n' '|')
+                # _vmstate looks like "false|http://..." or "true|"
+                case "$_vmstate" in
+                    true\|*|"|"*)
+                        # idle — fall through to tts-style reload below
+                        ;;
+                    *)
+                        mpv_cmd '{"command":["cycle","pause"]}' >/dev/null
+                        exit 0
+                        ;;
+                esac
+                ;;
+        esac
         # Reload-or-pause. The user-mental-model for Space in a session-pinned
         # popup is "play my session's clip". Reload whenever:
         #   - mpv is idle (nothing loaded), OR
