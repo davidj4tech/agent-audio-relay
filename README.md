@@ -46,12 +46,12 @@ pip install --user /path/to/agent-audio-relay
 `tts-status-line`, `aar-mpv-tunnel`, `agent-audio-relay-forwarder`) need
 a few binaries on `PATH` that aren't pulled in by pip:
 
-| Tool | Used by | Apt | Dnf |
-|---|---|---|---|
-| `socat` | tts-ctl/popup/status-line for mpv IPC | `apt install socat` | `dnf install socat` |
-| `jq` | tts-ctl for parsing mpv JSON-IPC replies | `apt install jq` | `dnf install jq` |
-| `inotify-tools` | forwarder watch loop | `apt install inotify-tools` | `dnf install inotify-tools` |
-| `openssh-client` | tunnel + forwarder | almost certainly already present | as above |
+| Tool | Used by | Apt | Dnf | Pacman |
+|---|---|---|---|---|
+| `socat` | tts-ctl/popup/status-line for mpv IPC | `apt install socat` | `dnf install socat` | `pacman -S socat` |
+| `jq` | tts-ctl for parsing mpv JSON-IPC replies | `apt install jq` | `dnf install jq` | `pacman -S jq` |
+| `inotify-tools` | forwarder watch loop | `apt install inotify-tools` | `dnf install inotify-tools` | `pacman -S inotify-tools` |
+| `openssh-client` | tunnel + forwarder | almost certainly already present | as above | as above |
 
 Install all four on every host that's not the playback host. **Without
 `socat` on a consumer host, `tts-ctl`/popup will silently no-op against
