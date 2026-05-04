@@ -217,78 +217,142 @@ def _mpv_send(socket_path: Path, command: list) -> Optional[dict]:
 # --- HTTP stream server ----------------------------------------------------
 #
 # Modeled on sam-radio: per-invocation HTTP endpoint that mpv (anywhere on
-# the network) can `loadfile`. The producer (us) writes MP3 bytes into a
-# queue; the HTTP handler dequeues and writes to the response. mpv handles
-# buffering, network jitter, codec chunking — we don't.
+# the network) can `loadfile`. The producer (us) appends MP3 bytes to a
+# growable in-memory buffer; HTTP handlers serve from any byte offset
+# (Range-aware) so mpv can seek mid-stream. mpv handles cache, jitter,
+# and codec framing — we don't.
 #
 # Why not per-segment loadfile-by-path: mpv-voice runs on the phone, the
 # audio files exist on the producer host (homer/melr/sp4r). loadfile of a
 # local path on the producer side resolves on the *phone's* filesystem
 # where the file doesn't exist. HTTP fixes that without adding scp/sshfs.
+#
+# Why a buffer instead of a one-shot queue: mpv may make multiple
+# concurrent GETs (probe + play, then more on every seek). A queue
+# disperses bytes across whichever handler is reading at the moment;
+# a shared buffer lets each handler tap in at the offset it cares about.
+
+
+class _StreamBuffer:
+    """Growable byte buffer + EOF flag, with a condition variable so
+    consumers can block on "more bytes appeared OR producer is done".
+    Thread-safe under multiple concurrent readers + a single writer.
+    """
+
+    def __init__(self) -> None:
+        self.data = bytearray()
+        self.complete = False
+        self._cond = threading.Condition()
+
+    def append(self, chunk: bytes) -> None:
+        with self._cond:
+            self.data.extend(chunk)
+            self._cond.notify_all()
+
+    def finalize(self) -> None:
+        with self._cond:
+            self.complete = True
+            self._cond.notify_all()
+
+    def __len__(self) -> int:
+        with self._cond:
+            return len(self.data)
+
+    def read_from(self, offset: int, max_chunk: int = 65536):
+        """Generator: yield bytes from ``offset`` onward. Blocks for new
+        data when caught up to the producer; returns when ``finalize()``
+        has been called and ``offset`` has reached the end.
+        """
+        while True:
+            with self._cond:
+                while offset >= len(self.data) and not self.complete:
+                    self._cond.wait()
+                if offset >= len(self.data):  # complete and drained
+                    return
+                end = min(offset + max_chunk, len(self.data))
+                chunk = bytes(self.data[offset:end])
+            yield chunk
+            offset += len(chunk)
 
 
 class _StreamHandler(http.server.BaseHTTPRequestHandler):
-    # Per-server queue + done-event + listener-close hook are wired in by
-    # _start_stream_server.
-    chunk_queue: "queue.Queue[Optional[bytes]]" = None  # type: ignore[assignment]
-    handler_done: threading.Event = None  # type: ignore[assignment]
-    close_listener = staticmethod(lambda: None)
+    # Per-server buffer + connection counter wired in by _start_stream_server.
+    stream_buffer: _StreamBuffer = None  # type: ignore[assignment]
+    active_handlers: list = None  # type: ignore[assignment]
 
     def log_message(self, fmt: str, *args) -> None:  # silence default access log
         pass
 
+    def _parse_range(self) -> int:
+        """Return the start offset for this request (0 if no Range header
+        or the request is a malformed open-ended range). We ignore the
+        end of the range — the response always streams to the current
+        end of the buffer (and beyond, until finalize)."""
+        rh = self.headers.get("Range", "")
+        if not rh.startswith("bytes="):
+            return 0
+        spec = rh[6:].split(",", 1)[0].strip()
+        start = spec.split("-", 1)[0].strip()
+        if not start:
+            return 0
+        try:
+            return max(0, int(start))
+        except ValueError:
+            return 0
+
     def do_HEAD(self) -> None:
-        # mpv/ffmpeg sometimes issues a HEAD probe before the playback
-        # GET; answer it so the probe doesn't (a) drain the queue or
-        # (b) confuse the demuxer about content type.
+        # ffmpeg's HTTP demuxer sometimes probes with HEAD before
+        # GETting the bytes. Answer with the headers a Range-capable
+        # consumer wants to see.
         self.send_response(200)
         self.send_header("Content-Type", "audio/mpeg")
+        self.send_header("Accept-Ranges", "bytes")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "close")
         self.end_headers()
 
     def do_GET(self) -> None:
-        # Close the listener as soon as the first GET arrives — mpv (or
-        # ffmpeg's HTTP demuxer underneath) sometimes opens a second
-        # connection mid-playback to probe / range-read, which would
-        # split the byte stream between two handlers and produce audio
-        # corruption or apparent "looping" near the end. One-shot bind
-        # avoids the whole class of problem.
-        self.close_listener()
-        # We accept any path — the URL we hand to mpv is the only one we
-        # advertise, and there's no security boundary worth enforcing here
-        # (the server only runs for the lifetime of one tts-stream call,
-        # bound to localhost-or-Tailscale by the operator's network config).
-        self.send_response(200)
+        start = self._parse_range()
+        is_range = self.headers.get("Range", "").startswith("bytes=")
+        # 206 only if we got a Range header, else 200. Some clients are
+        # picky about the distinction.
+        self.send_response(206 if is_range else 200)
         self.send_header("Content-Type", "audio/mpeg")
-        # No Content-Length since we don't know it ahead of time. mpv
-        # tolerates a connection-close EOF as the natural stream end.
+        # Advertising Accept-Ranges is what tells mpv it can seek. The
+        # actual seekability comes from us serving from arbitrary
+        # offsets in the buffer.
+        self.send_header("Accept-Ranges", "bytes")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "close")
+        if is_range:
+            # Total length unknown until finalize. RFC 7233 allows `*`
+            # for unknown total. We give the current end as the high
+            # watermark; the response continues past it as the buffer
+            # grows.
+            buf_end = max(len(self.stream_buffer) - 1, start)
+            self.send_header(
+                "Content-Range",
+                f"bytes {start}-{buf_end}/*",
+            )
         self.end_headers()
+
+        # Track active handlers so the producer can wait for everyone
+        # to drain before tearing the server down.
+        self.active_handlers.append(self)
         try:
-            while True:
-                chunk = self.chunk_queue.get()
-                if chunk is None:  # sentinel: stream complete
-                    break
+            for chunk in self.stream_buffer.read_from(start):
                 self.wfile.write(chunk)
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
-            # Client (mpv) closed early. Drain any remaining chunks so the
-            # producer doesn't block on a full queue forever.
-            while True:
-                try:
-                    if self.chunk_queue.get_nowait() is None:
-                        break
-                except queue.Empty:
-                    break
+            # Client closed (likely a seek — they'll reconnect with a
+            # new Range). Just exit cleanly so the next handler can
+            # take over.
+            pass
         finally:
-            # Signal the producer that the response was fully flushed
-            # (or the client gave up). Caller waits on this before tearing
-            # down the server / exiting the process — without it the
-            # daemon-thread handler can be killed mid-write when main
-            # returns, truncating mpv's audio.
-            self.handler_done.set()
+            try:
+                self.active_handlers.remove(self)
+            except ValueError:
+                pass
 
 
 class _StreamServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
@@ -298,48 +362,23 @@ class _StreamServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 def _start_stream_server(
     host: str = "0.0.0.0",
-) -> tuple[_StreamServer, "queue.Queue[Optional[bytes]]", int, threading.Event]:
-    """Bind a server on a random port, return (server, chunk_queue, port,
-    handler_done). The server runs in a daemon thread; caller pushes
-    bytes into the queue, then ``None`` as end-of-stream sentinel, then
-    waits on ``handler_done`` before tearing the server down.
+) -> tuple[_StreamServer, _StreamBuffer, int, list]:
+    """Bind a server on a random port. Returns (server, buffer, port,
+    active_handlers). Caller appends bytes via ``buffer.append(...)``,
+    finalizes via ``buffer.finalize()``, and waits for ``active_handlers``
+    to drain before tearing the server down.
     """
-    chunk_q: "queue.Queue[Optional[bytes]]" = queue.Queue(maxsize=64)
-    handler_done = threading.Event()
-    listener_closed = threading.Event()
-
-    # Holder so the handler can close the listener via close_listener()
-    # without circular-importing the server.
-    server_ref: list = []
-
-    def close_listener() -> None:
-        if listener_closed.is_set():
-            return
-        listener_closed.set()
-        srv = server_ref[0] if server_ref else None
-        if srv is not None:
-            try:
-                # Stop accepting new connections without disturbing the
-                # in-flight request. server_close() closes the listening
-                # socket; existing handler threads keep running.
-                srv.server_close()
-            except OSError:
-                pass
-
+    buf = _StreamBuffer()
+    active_handlers: list = []
     handler_cls = type(
         "BoundStreamHandler",
         (_StreamHandler,),
-        {
-            "chunk_queue": chunk_q,
-            "handler_done": handler_done,
-            "close_listener": staticmethod(close_listener),
-        },
+        {"stream_buffer": buf, "active_handlers": active_handlers},
     )
     server = _StreamServer((host, 0), handler_cls)
-    server_ref.append(server)
     port = server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    return server, chunk_q, port, handler_done
+    return server, buf, port, active_handlers
 
 
 def _resolve_advertise_host(target_socket_path: Optional[Path]) -> str:
@@ -386,8 +425,8 @@ class StreamRunner:
         self.first_dispatch_done = threading.Event()
         self.errors: list[str] = []
         self._stream_server: Optional[_StreamServer] = None
-        self._stream_queue: Optional["queue.Queue[Optional[bytes]]"] = None
-        self._handler_done: Optional[threading.Event] = None
+        self._stream_buffer: Optional[_StreamBuffer] = None
+        self._active_handlers: Optional[list] = None
 
     # --- segment rendering -------------------------------------------------
 
@@ -448,23 +487,24 @@ class StreamRunner:
             self.next_dispatch += 1
 
     def _dispatch_one(self, seq: int, path: Path) -> None:
-        # Stream the segment's MP3 bytes into the HTTP stream queue. mpv
-        # is connected to the HTTP endpoint (set up at run start) and
-        # consumes the bytes as they arrive, so playback proceeds in
-        # order without any per-segment loadfile cost. Concatenated MP3
-        # frames produce a valid stream; mpv handles framing.
+        # Append the segment's MP3 bytes to the shared stream buffer.
+        # mpv (already connected via loadfile at run start) reads
+        # forward-only; the buffer also retains earlier bytes so any
+        # seek-back the user does in the popup can be served from
+        # memory. Concatenated MP3 frames produce a valid stream;
+        # mpv handles framing.
         try:
             data = path.read_bytes()
         except OSError as e:
             self.errors.append(f"read seg {seq}: {e}")
             return
-        if self._stream_queue is None:
+        if self._stream_buffer is None:
             self.errors.append(f"seg {seq}: stream server not running")
             return
-        self._stream_queue.put(data)
+        self._stream_buffer.append(data)
         if seq == 0:
             self.first_dispatch_done.set()
-        self._log(f"seg {seq} → stream ({len(data)} bytes)")
+        self._log(f"seg {seq} → stream ({len(data)} bytes, buf={len(self._stream_buffer)})")
 
     # --- stream loop -------------------------------------------------------
 
@@ -478,11 +518,10 @@ class StreamRunner:
             return 2
 
         # Start the HTTP stream server, tell mpv to connect to it. mpv
-        # holds the connection open and consumes MP3 bytes as we push
-        # them; we close the stream (sentinel) when all segments have
-        # been dispatched, mpv then plays through its remaining buffer
-        # and goes idle.
-        self._stream_server, self._stream_queue, port, self._handler_done = _start_stream_server()
+        # reads from the buffer; we mark it complete (finalize) when all
+        # segments have been dispatched. mpv plays through, goes idle,
+        # and we wait for any ongoing handlers to drain before exiting.
+        self._stream_server, self._stream_buffer, port, self._active_handlers = _start_stream_server()
         host = _resolve_advertise_host(self.args.socket)
         url = f"http://{host}:{port}/stream.mp3"
         self._log(f"stream URL = {url}")
@@ -587,18 +626,21 @@ class StreamRunner:
         # exit; mpv keeps playing what it's already buffered (which
         # should be everything, since the stream completes faster than
         # playback for typical responses).
-        if self._stream_queue is not None:
-            self._stream_queue.put(None)
-        # Wait for the HTTP handler to fully flush all chunks to mpv
-        # before tearing down the server. Without this, the daemon
-        # handler thread can be killed mid-write when main exits and
-        # mpv loses the tail of the audio.
-        if self._handler_done is not None:
-            self._handler_done.wait(timeout=30)
+        # Mark the buffer complete. Any handler currently reading will
+        # drain to the buffer end and then EOF. New connections (e.g. a
+        # post-end seek) get the full buffer and finish.
+        if self._stream_buffer is not None:
+            self._stream_buffer.finalize()
+        # Wait for active handlers to drain so daemon threads don't get
+        # killed mid-write when main exits — that would truncate the
+        # tail of mpv's audio. Bound the wait so we can't hang forever
+        # on a wedged client.
+        deadline = time.monotonic() + 30
+        while self._active_handlers and time.monotonic() < deadline:
+            if not self._active_handlers:
+                break
+            time.sleep(0.1)
         if self._stream_server is not None:
-            # server_close was likely already called by close_listener()
-            # on first GET, but call shutdown() to stop the serve_forever
-            # loop (idempotent).
             self._stream_server.shutdown()
         self._log("stream closed")
 
