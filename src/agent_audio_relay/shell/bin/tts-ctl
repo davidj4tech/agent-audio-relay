@@ -297,6 +297,26 @@ case "${1:-}" in
     slower)  mpv_cmd '{"command":["multiply","speed",0.9091]}'         >/dev/null ;;
     faster)  mpv_cmd '{"command":["multiply","speed",1.1]}'            >/dev/null ;;
     speed)   mpv_cmd "{\"command\":[\"set_property\",\"speed\",${2:-1}]}" >/dev/null ;;
+    stop)    mpv_cmd '{"command":["stop"]}'                            >/dev/null ;;
+    stop-all)
+        # Silence every channel (tts, voice, music) regardless of which
+        # one --socket pointed at — useful when a streaming voice
+        # response from a different session is making noise and you
+        # just want it to stop. Sends `stop` to each channel's tunnel
+        # socket in parallel; missing sockets are skipped quietly.
+        # Also kills any local tts-stream producer processes so they
+        # don't keep generating into the void after their consumer
+        # (mpv) has been silenced.
+        _state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/agent-audio-relay"
+        for _ch in mpv-tts mpv-voice mpv-music; do
+            _sock="$_state_dir/$_ch.sock"
+            [ -S "$_sock" ] || continue
+            (printf '%s\n' '{"command":["stop"]}' \
+                | socat -T 1 - "UNIX-CONNECT:$_sock" >/dev/null 2>&1) &
+        done
+        wait
+        pkill -f 'agent_audio_relay\.tts_stream' 2>/dev/null || true
+        ;;
     prev|next)
         # Walk the session's archive by mtime. Find the currently-loaded
         # clip's position, jump to the older (prev) or newer (next) one.
@@ -393,7 +413,7 @@ case "${1:-}" in
         mpv_batch_get "$@"
         ;;
     *)
-        echo "Usage: tts-ctl [--socket PATH] pause|resume|toggle|replay [session]|prev|next [session]|playlist-prev|playlist-next|seek SECS|seek-percent PCT|start|volume DELTA|mute|slower|faster|speed N|status|nowplaying|get PROP..." >&2
+        echo "Usage: tts-ctl [--socket PATH] pause|resume|toggle|replay [session]|prev|next [session]|playlist-prev|playlist-next|seek SECS|seek-percent PCT|start|volume DELTA|mute|slower|faster|speed N|stop|stop-all|status|nowplaying|get PROP..." >&2
         exit 1
         ;;
 esac
