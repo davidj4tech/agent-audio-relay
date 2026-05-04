@@ -287,6 +287,8 @@ case "${1:-}" in
         fi
         # else: no clip for this session — silent no-op, popup surfaces it.
         ;;
+    playlist-prev) mpv_cmd '{"command":["playlist-prev"]}' >/dev/null ;;
+    playlist-next) mpv_cmd '{"command":["playlist-next"]}' >/dev/null ;;
     seek)    mpv_cmd "{\"command\":[\"seek\",${2:-5},\"relative\"]}"   >/dev/null ;;
     seek-percent) mpv_cmd "{\"command\":[\"seek\",${2:-50},\"absolute-percent\"]}" >/dev/null ;;
     start)   mpv_cmd '{"command":["seek",0,"absolute"]}'               >/dev/null ;;
@@ -391,7 +393,7 @@ case "${1:-}" in
         mpv_batch_get "$@"
         ;;
     *)
-        echo "Usage: tts-ctl pause|resume|toggle|replay [session]|seek SECS|start|volume DELTA|mute|slower|faster|speed N|status|nowplaying|get PROP..." >&2
+        echo "Usage: tts-ctl [--socket PATH] pause|resume|toggle|replay [session]|prev|next [session]|playlist-prev|playlist-next|seek SECS|seek-percent PCT|start|volume DELTA|mute|slower|faster|speed N|status|nowplaying|get PROP..." >&2
         exit 1
         ;;
 esac

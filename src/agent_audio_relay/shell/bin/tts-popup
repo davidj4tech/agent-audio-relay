@@ -467,8 +467,16 @@ while true; do
     case "$key" in
         ' '|p) ctl toggle "$SESSION" >/dev/null 2>&1 & disown
              LOAD_PENDING_SINCE=$SECONDS; LAST_KEY="space" ;;
-        r)   ctl replay "$SESSION" >/dev/null 2>&1 & disown
-             LOAD_PENDING_SINCE=$SECONDS; LAST_KEY="replay" ;;
+        r)
+            # tts: replay this session's latest archived clip.
+            # music/voice: no archive — restart the currently-loaded track.
+            if [ "$CHANNEL" = "tts" ]; then
+                ctl replay "$SESSION" >/dev/null 2>&1 & disown
+                LOAD_PENDING_SINCE=$SECONDS; LAST_KEY="replay"
+            else
+                ctl start >/dev/null 2>&1 & disown; LAST_KEY="restart"
+            fi
+            ;;
         0)   ctl start    >/dev/null 2>&1 & disown; LAST_KEY="start" ;;
         h)   ctl seek -5  >/dev/null 2>&1 & disown; LAST_KEY="-5s" ;;
         l)   ctl seek 5   >/dev/null 2>&1 & disown; LAST_KEY="+5s" ;;
@@ -479,10 +487,24 @@ while true; do
         m)   ctl mute     >/dev/null 2>&1 & disown; LAST_KEY="mute" ;;
         '[') ctl slower   >/dev/null 2>&1 & disown; LAST_KEY="slower" ;;
         ']') ctl faster   >/dev/null 2>&1 & disown; LAST_KEY="faster" ;;
-        '<') ctl prev "$SESSION" >/dev/null 2>&1 & disown
-             LOAD_PENDING_SINCE=$SECONDS; LAST_KEY="prev" ;;
-        '>') ctl next "$SESSION" >/dev/null 2>&1 & disown
-             LOAD_PENDING_SINCE=$SECONDS; LAST_KEY="next" ;;
+        '<')
+            # tts: walk this session's archive backward.
+            # music/voice: walk mpv's playlist backward.
+            if [ "$CHANNEL" = "tts" ]; then
+                ctl prev "$SESSION" >/dev/null 2>&1 & disown
+            else
+                ctl playlist-prev >/dev/null 2>&1 & disown
+            fi
+            LOAD_PENDING_SINCE=$SECONDS; LAST_KEY="prev"
+            ;;
+        '>')
+            if [ "$CHANNEL" = "tts" ]; then
+                ctl next "$SESSION" >/dev/null 2>&1 & disown
+            else
+                ctl playlist-next >/dev/null 2>&1 & disown
+            fi
+            LOAD_PENDING_SINCE=$SECONDS; LAST_KEY="next"
+            ;;
         DELETE|$'\b'|$'\x7f') ctl speed 1 >/dev/null 2>&1 & disown; LAST_KEY="speed=1" ;;
         # mpv/VLC convention: digits 1-9 jump to N×10% of the clip.
         # 0 stays as seek-to-start (which is also 0% — consistent).
