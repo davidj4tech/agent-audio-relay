@@ -29,11 +29,14 @@ pipeline; tts-drop runs *once* at the end with the concatenated blob.
 from __future__ import annotations
 
 import argparse
+import http.server
 import json
 import os
+import queue
 import re
 import shutil
 import socket
+import socketserver
 import subprocess
 import sys
 import tempfile
@@ -249,6 +252,117 @@ def _mpv_send(socket_path: Path, command: list) -> Optional[dict]:
         return None
 
 
+# --- HTTP stream server ----------------------------------------------------
+#
+# Modeled on sam-radio: per-invocation HTTP endpoint that mpv (anywhere on
+# the network) can `loadfile`. The producer (us) writes MP3 bytes into a
+# queue; the HTTP handler dequeues and writes to the response. mpv handles
+# buffering, network jitter, codec chunking — we don't.
+#
+# Why not per-segment loadfile-by-path: mpv-voice runs on the phone, the
+# audio files exist on the producer host (homer/melr/sp4r). loadfile of a
+# local path on the producer side resolves on the *phone's* filesystem
+# where the file doesn't exist. HTTP fixes that without adding scp/sshfs.
+
+
+class _StreamHandler(http.server.BaseHTTPRequestHandler):
+    # Per-server queue + done-event are wired in by _start_stream_server.
+    chunk_queue: "queue.Queue[Optional[bytes]]" = None  # type: ignore[assignment]
+    handler_done: threading.Event = None  # type: ignore[assignment]
+
+    def log_message(self, fmt: str, *args) -> None:  # silence default access log
+        pass
+
+    def do_GET(self) -> None:
+        # We accept any path — the URL we hand to mpv is the only one we
+        # advertise, and there's no security boundary worth enforcing here
+        # (the server only runs for the lifetime of one tts-stream call,
+        # bound to localhost-or-Tailscale by the operator's network config).
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/mpeg")
+        # No Content-Length since we don't know it ahead of time. mpv
+        # tolerates a connection-close EOF as the natural stream end.
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        try:
+            while True:
+                chunk = self.chunk_queue.get()
+                if chunk is None:  # sentinel: stream complete
+                    break
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            # Client (mpv) closed early. Drain any remaining chunks so the
+            # producer doesn't block on a full queue forever.
+            while True:
+                try:
+                    if self.chunk_queue.get_nowait() is None:
+                        break
+                except queue.Empty:
+                    break
+        finally:
+            # Signal the producer that the response was fully flushed
+            # (or the client gave up). Caller waits on this before tearing
+            # down the server / exiting the process — without it the
+            # daemon-thread handler can be killed mid-write when main
+            # returns, truncating mpv's audio.
+            self.handler_done.set()
+
+
+class _StreamServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+def _start_stream_server(
+    host: str = "0.0.0.0",
+) -> tuple[_StreamServer, "queue.Queue[Optional[bytes]]", int, threading.Event]:
+    """Bind a server on a random port, return (server, chunk_queue, port,
+    handler_done). The server runs in a daemon thread; caller pushes
+    bytes into the queue, then ``None`` as end-of-stream sentinel, then
+    waits on ``handler_done`` before tearing the server down.
+    """
+    chunk_q: "queue.Queue[Optional[bytes]]" = queue.Queue(maxsize=64)
+    handler_done = threading.Event()
+
+    handler_cls = type(
+        "BoundStreamHandler",
+        (_StreamHandler,),
+        {"chunk_queue": chunk_q, "handler_done": handler_done},
+    )
+    server = _StreamServer((host, 0), handler_cls)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, chunk_q, port, handler_done
+
+
+def _resolve_advertise_host(target_socket_path: Optional[Path]) -> str:
+    """Pick a hostname/IP that the playback host (typically the phone) can
+    reach back to us on. Strategy:
+      1. Explicit AAR_STREAM_HOST env override (best — operator knows).
+      2. socket.gethostname() — works when Tailscale MagicDNS or LAN DNS
+         resolves the hostname phone-side.
+      3. Fallback: a UDP "connect" to a public IP to discover the local
+         outbound interface IP (no packets sent).
+    Pick 1 wins outright. Pick 2/3 are best-effort guesses.
+    """
+    explicit = os.environ.get("AAR_STREAM_HOST")
+    if explicit:
+        return explicit
+    name = socket.gethostname()
+    if name and name != "localhost":
+        return name
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 1))
+        return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
 # --- Main pipeline ---------------------------------------------------------
 
 
@@ -266,6 +380,9 @@ class StreamRunner:
         self.dispatched: list[Path] = []
         self.first_dispatch_done = threading.Event()
         self.errors: list[str] = []
+        self._stream_server: Optional[_StreamServer] = None
+        self._stream_queue: Optional["queue.Queue[Optional[bytes]]"] = None
+        self._handler_done: Optional[threading.Event] = None
 
     # --- segment rendering -------------------------------------------------
 
@@ -324,18 +441,23 @@ class StreamRunner:
             self.next_dispatch += 1
 
     def _dispatch_one(self, seq: int, path: Path) -> None:
-        # First segment: replace whatever was loaded on voice channel and
-        # unpause. Subsequent segments append-play so mpv's playlist
-        # transitions between them gaplessly (within mp3 codec limits).
-        mode = "replace" if seq == 0 else "append-play"
-        resp = _mpv_send(self.args.socket, ["loadfile", str(path), mode])
-        if resp and resp.get("error") and resp["error"] != "success":
-            self.errors.append(f"loadfile seg {seq}: {resp.get('error')}")
+        # Stream the segment's MP3 bytes into the HTTP stream queue. mpv
+        # is connected to the HTTP endpoint (set up at run start) and
+        # consumes the bytes as they arrive, so playback proceeds in
+        # order without any per-segment loadfile cost. Concatenated MP3
+        # frames produce a valid stream; mpv handles framing.
+        try:
+            data = path.read_bytes()
+        except OSError as e:
+            self.errors.append(f"read seg {seq}: {e}")
             return
+        if self._stream_queue is None:
+            self.errors.append(f"seg {seq}: stream server not running")
+            return
+        self._stream_queue.put(data)
         if seq == 0:
-            _mpv_send(self.args.socket, ["set_property", "pause", False])
             self.first_dispatch_done.set()
-        self._log(f"seg {seq} → mpv ({mode})")
+        self._log(f"seg {seq} → stream ({len(data)} bytes)")
 
     # --- stream loop -------------------------------------------------------
 
@@ -347,6 +469,21 @@ class StreamRunner:
                 file=sys.stderr,
             )
             return 2
+
+        # Start the HTTP stream server, tell mpv to connect to it. mpv
+        # holds the connection open and consumes MP3 bytes as we push
+        # them; we close the stream (sentinel) when all segments have
+        # been dispatched, mpv then plays through its remaining buffer
+        # and goes idle.
+        self._stream_server, self._stream_queue, port, self._handler_done = _start_stream_server()
+        host = _resolve_advertise_host(self.args.socket)
+        url = f"http://{host}:{port}/stream.mp3"
+        self._log(f"stream URL = {url}")
+        load_resp = _mpv_send(self.args.socket, ["loadfile", url, "replace"])
+        if load_resp and load_resp.get("error") and load_resp["error"] != "success":
+            self.errors.append(f"mpv loadfile {url}: {load_resp.get('error')}")
+            return 1
+        _mpv_send(self.args.socket, ["set_property", "pause", False])
 
         buf = ""
         seq = 0
@@ -427,6 +564,26 @@ class StreamRunner:
         # the executor's last on_done fired but before shutdown returned.
         with self.dispatch_lock:
             self._drain_locked()
+
+        # Signal end-of-stream to the HTTP handler. mpv reads up to its
+        # buffer and then plays it out; when its buffer empties it goes
+        # idle. We don't wait for mpv to finish playing — the user's
+        # shell would feel stuck for the full audio duration. Instead we
+        # exit; mpv keeps playing what it's already buffered (which
+        # should be everything, since the stream completes faster than
+        # playback for typical responses).
+        if self._stream_queue is not None:
+            self._stream_queue.put(None)
+        # Wait for the HTTP handler to fully flush all chunks to mpv
+        # before tearing down the server. Without this, the daemon
+        # handler thread can be killed mid-write when main exits and
+        # mpv loses the tail of the audio.
+        if self._handler_done is not None:
+            self._handler_done.wait(timeout=30)
+        if self._stream_server is not None:
+            self._stream_server.shutdown()
+            self._stream_server.server_close()
+        self._log("stream closed")
 
         # Archive the full response as a single concatenated clip via
         # tts-drop, so replay/prev/next still walk *responses*.
