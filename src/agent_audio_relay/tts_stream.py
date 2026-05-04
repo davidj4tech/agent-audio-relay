@@ -266,14 +266,33 @@ def _mpv_send(socket_path: Path, command: list) -> Optional[dict]:
 
 
 class _StreamHandler(http.server.BaseHTTPRequestHandler):
-    # Per-server queue + done-event are wired in by _start_stream_server.
+    # Per-server queue + done-event + listener-close hook are wired in by
+    # _start_stream_server.
     chunk_queue: "queue.Queue[Optional[bytes]]" = None  # type: ignore[assignment]
     handler_done: threading.Event = None  # type: ignore[assignment]
+    close_listener = staticmethod(lambda: None)
 
     def log_message(self, fmt: str, *args) -> None:  # silence default access log
         pass
 
+    def do_HEAD(self) -> None:
+        # mpv/ffmpeg sometimes issues a HEAD probe before the playback
+        # GET; answer it so the probe doesn't (a) drain the queue or
+        # (b) confuse the demuxer about content type.
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/mpeg")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
     def do_GET(self) -> None:
+        # Close the listener as soon as the first GET arrives — mpv (or
+        # ffmpeg's HTTP demuxer underneath) sometimes opens a second
+        # connection mid-playback to probe / range-read, which would
+        # split the byte stream between two handlers and produce audio
+        # corruption or apparent "looping" near the end. One-shot bind
+        # avoids the whole class of problem.
+        self.close_listener()
         # We accept any path — the URL we hand to mpv is the only one we
         # advertise, and there's no security boundary worth enforcing here
         # (the server only runs for the lifetime of one tts-stream call,
@@ -325,13 +344,37 @@ def _start_stream_server(
     """
     chunk_q: "queue.Queue[Optional[bytes]]" = queue.Queue(maxsize=64)
     handler_done = threading.Event()
+    listener_closed = threading.Event()
+
+    # Holder so the handler can close the listener via close_listener()
+    # without circular-importing the server.
+    server_ref: list = []
+
+    def close_listener() -> None:
+        if listener_closed.is_set():
+            return
+        listener_closed.set()
+        srv = server_ref[0] if server_ref else None
+        if srv is not None:
+            try:
+                # Stop accepting new connections without disturbing the
+                # in-flight request. server_close() closes the listening
+                # socket; existing handler threads keep running.
+                srv.server_close()
+            except OSError:
+                pass
 
     handler_cls = type(
         "BoundStreamHandler",
         (_StreamHandler,),
-        {"chunk_queue": chunk_q, "handler_done": handler_done},
+        {
+            "chunk_queue": chunk_q,
+            "handler_done": handler_done,
+            "close_listener": staticmethod(close_listener),
+        },
     )
     server = _StreamServer((host, 0), handler_cls)
+    server_ref.append(server)
     port = server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, chunk_q, port, handler_done
@@ -479,6 +522,14 @@ class StreamRunner:
         host = _resolve_advertise_host(self.args.socket)
         url = f"http://{host}:{port}/stream.mp3"
         self._log(f"stream URL = {url}")
+        # Hard-clear any prior playback state on the voice channel
+        # before loading our URL. Without this, content from a previous
+        # tts-stream run that was paused mid-cache (or never fully
+        # consumed) can replay alongside / after the new content — the
+        # user hears a leftover snippet from an earlier response.
+        # `stop` clears playlist + flushes demuxer cache + halts
+        # playback; `loadfile replace` then starts genuinely fresh.
+        _mpv_send(self.args.socket, ["stop"])
         load_resp = _mpv_send(self.args.socket, ["loadfile", url, "replace"])
         if load_resp and load_resp.get("error") and load_resp["error"] != "success":
             self.errors.append(f"mpv loadfile {url}: {load_resp.get('error')}")
@@ -581,8 +632,10 @@ class StreamRunner:
         if self._handler_done is not None:
             self._handler_done.wait(timeout=30)
         if self._stream_server is not None:
+            # server_close was likely already called by close_listener()
+            # on first GET, but call shutdown() to stop the serve_forever
+            # loop (idempotent).
             self._stream_server.shutdown()
-            self._stream_server.server_close()
         self._log("stream closed")
 
         # Archive the full response as a single concatenated clip via
