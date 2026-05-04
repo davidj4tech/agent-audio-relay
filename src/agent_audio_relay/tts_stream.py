@@ -376,8 +376,16 @@ class StreamRunner:
                     # Echo through unbuffered so the user sees text appear at
                     # the same cadence as it streams through us — same UX as
                     # `llm "..."` without tts-stream in the pipe.
-                    sys.stdout.write(chunk)
-                    sys.stdout.flush()
+                    # Swallow BrokenPipeError so an early-closing downstream
+                    # consumer (e.g. `tee >(tts-stream >/dev/null)` where
+                    # tts-stream exits before llm finishes) doesn't trash
+                    # the user's terminal with a stack trace.
+                    try:
+                        sys.stdout.write(chunk)
+                        sys.stdout.flush()
+                    except BrokenPipeError:
+                        # Drop to no-op tee for the rest of the run.
+                        self.args.tee = False
             # Re-strip on every iteration since a code fence may straddle
             # chunk boundaries; the operation is cheap on text this small.
             buf_view = _strip_code_blocks(raw_buf)
@@ -636,12 +644,24 @@ def main() -> None:
                 pass
 
     runner = StreamRunner(args)
-    rc = runner.run()
+    try:
+        rc = runner.run()
+    except BrokenPipeError:
+        # Final safety net: any flush at interpreter shutdown that hits
+        # a closed downstream pipe shouldn't print a traceback.
+        rc = 0
     if not args.keep_work:
         try:
             shutil.rmtree(runner.work_dir, ignore_errors=True)
         except OSError:
             pass
+    # Avoid the "Exception ignored on flushing sys.stdout" message Python
+    # prints at shutdown when stdout is a broken pipe — close stdout so
+    # the interpreter doesn't try to flush it.
+    try:
+        sys.stdout.close()
+    except (BrokenPipeError, OSError):
+        pass
     sys.exit(rc)
 
 
