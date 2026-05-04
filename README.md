@@ -403,6 +403,25 @@ cp extensions/pi-tts-extension.ts ~/.pi/agent/extensions/agent-audio-relay-tts.t
 When `PI_TTS_ENGINE=openai`, set `OPENAI_API_KEY` in the environment pi
 is launched from.
 
+#### Streaming variant (sibling extension)
+
+For low-latency playback during long responses, install the streaming
+extension instead. It listens for pi's per-token `message_update` events
+and pipes the deltas into a `tts-stream` subprocess so audio starts
+within ~2-3s of the first sentence completing instead of waiting for
+the whole response.
+
+```sh
+cp extensions/pi-tts-stream-extension.ts \
+   ~/.pi/agent/extensions/agent-audio-relay-tts-stream.ts
+# Don't install both — pick streaming OR post-completion, not both.
+```
+
+Engine + voice config is inherited via tts-stream's own env vars
+(`RELAY_TTS_ENGINE`, `RELAY_OPENAI_VOICE`, `RELAY_QWEN_VOICE`,
+`OPENAI_API_KEY`, `DASHSCOPE_API_KEY`, etc.) so there's no per-extension
+duplication. Set `PI_TTS_STREAM_ENABLED=0` to disable.
+
 ### OpenCode
 
 Long-running watcher that polls OpenCode sessions for new `final_answer`
