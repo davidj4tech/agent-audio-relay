@@ -151,7 +151,13 @@ def _render_edge(text: str, outfile: Path, *, voice: str, edge_bin: str) -> bool
     return proc.returncode == 0 and outfile.exists() and outfile.stat().st_size > 0
 
 
-def _render_openai(text: str, outfile: Path, *, voice: str, model: str, python_bin: str) -> bool:
+def _render_openai(text: str, outfile: Path, *, voice: str, model: str, python_bin: str) -> tuple[bool, str]:
+    """Returns (ok, stderr_text). Caller logs the stderr when ok is False
+    so failures aren't silent — the most common failure mode is the
+    chosen python lacking the ``openai`` module, which is recoverable
+    by pointing ``--openai-python`` (or ``RELAY_OPENAI_PYTHON``) at the
+    right venv.
+    """
     script = (
         "import os, sys\n"
         "from openai import OpenAI\n"
@@ -174,7 +180,9 @@ def _render_openai(text: str, outfile: Path, *, voice: str, model: str, python_b
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
     )
-    return proc.returncode == 0 and outfile.exists() and outfile.stat().st_size > 0
+    err = proc.stderr.decode(errors="replace").strip()
+    ok = proc.returncode == 0 and outfile.exists() and outfile.stat().st_size > 0
+    return ok, err
 
 
 # --- mpv IPC ---------------------------------------------------------------
@@ -235,14 +243,21 @@ class StreamRunner:
         outfile = self.work_dir / f"{seq:04d}.mp3"
         ok = False
         if self.args.engine == "openai":
-            ok = _render_openai(
+            ok, err = _render_openai(
                 text, outfile,
                 voice=self.args.voice or self.args.openai_voice,
                 model=self.args.openai_model,
                 python_bin=self.args.openai_python,
             )
             if not ok:  # fall back to edge
-                self._log(f"seg {seq}: openai failed, falling back to edge")
+                # Surface the openai stderr so the user can fix the
+                # underlying issue (most common: ``ModuleNotFoundError:
+                # No module named 'openai'`` because RELAY_OPENAI_PYTHON
+                # points at a python without the openai package).
+                self.errors.append(
+                    f"seg {seq}: openai failed ({err or 'no stderr'}); "
+                    f"falling back to edge"
+                )
                 ok = _render_edge(
                     text, outfile,
                     voice=self.args.edge_voice, edge_bin=self.args.edge_bin,
@@ -319,6 +334,12 @@ class StreamRunner:
                 in_eof = True
             else:
                 raw_buf += chunk
+                if self.args.tee:
+                    # Echo through unbuffered so the user sees text appear at
+                    # the same cadence as it streams through us — same UX as
+                    # `llm "..."` without tts-stream in the pipe.
+                    sys.stdout.write(chunk)
+                    sys.stdout.flush()
             # Re-strip on every iteration since a code fence may straddle
             # chunk boundaries; the operation is cheap on text this small.
             buf_view = _strip_code_blocks(raw_buf)
@@ -473,7 +494,14 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="tts-stream",
         description="Incremental TTS for streaming model output.",
     )
-    p.add_argument("--engine", default=os.environ.get("RELAY_TTS_ENGINE", "edge"),
+    # Default engine: respect explicit RELAY_TTS_ENGINE; otherwise prefer
+    # openai when OPENAI_API_KEY is present (it sounds noticeably better
+    # for long-form spoken content), and fall back to edge so the tool
+    # works out of the box without an API key.
+    _default_engine = os.environ.get("RELAY_TTS_ENGINE") or (
+        "openai" if os.environ.get("OPENAI_API_KEY") else "edge"
+    )
+    p.add_argument("--engine", default=_default_engine,
                    choices=["edge", "openai"])
     p.add_argument("--voice", default=None,
                    help="Engine-specific voice name (overrides per-engine default).")
@@ -511,12 +539,44 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Per-run scratch dir for segment files. Default: /tmp/tts-stream/<run-id>/")
     p.add_argument("--keep-work", action="store_true",
                    help="Don't remove the per-run scratch dir after the stream ends.")
+    p.add_argument("--no-tee", dest="tee", action="store_false",
+                   help="Don't echo stdin to stdout. Default: tee everything "
+                        "through so the user sees the text in their terminal.")
     p.add_argument("-v", "--verbose", action="store_true")
+    p.set_defaults(tee=True)
     return p
+
+
+def _autodetect_openai_python(current: str) -> str:
+    """If ``current`` doesn't have the ``openai`` module, look for one that
+    does in the usual pipx venv locations. Returns the first python that
+    can ``import openai`` (current preferred), else ``current`` unchanged
+    so the caller's eventual error message stays attributable.
+    """
+    candidates = [current]
+    pipx_root = Path(os.environ.get("PIPX_HOME",
+                                    Path.home() / ".local" / "pipx"))
+    candidates.append(str(pipx_root / "venvs" / "openai" / "bin" / "python3"))
+    candidates.append(str(pipx_root / "venvs" / "llm" / "bin" / "python3"))
+    for c in candidates:
+        if not c or not Path(c).exists() and c != "python3":
+            continue
+        try:
+            r = subprocess.run([c, "-c", "import openai"],
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL,
+                               timeout=2)
+            if r.returncode == 0:
+                return c
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return current
 
 
 def main() -> None:
     args = _build_parser().parse_args()
+    if args.engine == "openai":
+        args.openai_python = _autodetect_openai_python(args.openai_python)
     if not args.session:
         # Inherit tmux session if available — same convention as tts-drop.
         if os.environ.get("TMUX"):
