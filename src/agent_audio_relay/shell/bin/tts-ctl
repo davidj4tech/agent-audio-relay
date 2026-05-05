@@ -86,8 +86,10 @@ mpv_cmd() {
 
 mpv_get() {
     local prop="$1"
+    # -c (compact) so structured values (arrays/objects) survive as a
+    # single line for downstream parsing.
     mpv_cmd "{\"command\":[\"get_property\",\"$prop\"]}" \
-        | jq -r 'select(.error=="success") | .data' 2>/dev/null
+        | jq -rc 'select(.error=="success") | .data' 2>/dev/null
 }
 
 # Batched get: one IPC round-trip for N properties. Echoes one value per
@@ -110,8 +112,10 @@ mpv_batch_get() {
         # Emit exactly one line per prop (empty if unavailable) so callers
         # using mapfile keep stable indices.
         local val
+        # -c (compact) keeps array/object values on a single line so the
+        # downstream `head -n1` doesn't truncate them to `[` or `{`.
         val=$(printf '%s\n' "$raw" \
-            | jq -r --argjson rid "$i" \
+            | jq -rc --argjson rid "$i" \
                 'select(.request_id==$rid and .error=="success") | .data' 2>/dev/null \
             | head -n1)
         printf '%s\n' "$val"
