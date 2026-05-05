@@ -49,14 +49,15 @@ while IFS= read -r marker; do
   [ -f "$audio" ] || { rm -f "$marker"; continue; }
   src_dir=$(basename "$(dirname "$audio")")
   remote_dir="$REMOTE_BASE/$src_dir"
-  remote_audio="$remote_dir/$(basename "$audio")"
   # scp, not rsync: rsync's tmp-file+rename pattern doesn't fire
   # CLOSE_WRITE/MOVED_TO on Termux/Android, so the remote relay's
-  # inotifywait never sees rsync-delivered files. Emit the remote
-  # marker via ssh-touch *after* the audio scp lands, mirroring the
-  # local publish-after-rename ordering.
-  if scp -q "$audio" "$REMOTE:$remote_dir/" 2>/dev/null \
-       && ssh -o ConnectTimeout=5 "$REMOTE" "touch '$remote_audio.play'" 2>/dev/null; then
+  # inotifywait never sees rsync-delivered files. Send audio *and*
+  # marker in one scp invocation — scp processes sources in argv
+  # order, so the marker's CLOSE_WRITE fires after the audio is in
+  # place. Termux's `touch` uses utimensat() and silently fails to
+  # fire CLOSE_WRITE on file creation, so ssh-touch doesn't work as
+  # the publish signal; an actual write (scp) does.
+  if scp -q "$audio" "$marker" "$REMOTE:$remote_dir/" 2>/dev/null; then
     rm -f "$audio" "$marker"
     echo "[forwarder] sent $audio -> $REMOTE:$remote_dir/" >&2
   else
