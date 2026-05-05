@@ -293,11 +293,21 @@ def watch() -> None:
 
     assert proc.stdout is not None
     for line in proc.stdout:
-        filepath = line.strip()
-        # Only pick up files dropped into a tts-* directory
-        # (denote-named or legacy voice-<ns> — both accepted)
+        marker = line.strip()
+        # Publish protocol: producers create `<audio>.play` *after* the
+        # audio file is at its final path. We only act on markers, so
+        # non-published audio (e.g. tts-stream's concat archive that
+        # already played live on a different channel) coexists in the
+        # watch dir without triggering playback.
+        if not marker.endswith(".play"):
+            continue
+        filepath = marker[:-len(".play")]
         if "/tts-" not in filepath:
             continue
+        try:
+            os.unlink(marker)
+        except OSError:
+            pass
         enqueue_file(filepath)
         process_queue(resolve)
         trim_state()

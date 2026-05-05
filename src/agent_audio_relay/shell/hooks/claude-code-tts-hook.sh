@@ -100,6 +100,24 @@ text=$(tac "$transcript_path" \
 
 [ -z "$text" ] && exit 0
 
+# Long replies blow past the 30s hook timeout on the openai engine. Route
+# them to tts-stream (voice channel) instead — segmented render starts
+# audio in ~3s and short tts-channel clips will duck over the top. Stamp
+# eagerly so the Notification suppressor still fires while tts-stream
+# runs detached.
+LONG_THRESHOLD="${CLAUDE_TTS_LONG_THRESHOLD:-1200}"
+if [ "${#text}" -gt "$LONG_THRESHOLD" ]; then
+    TTS_STREAM="${RELAY_TTS_STREAM_BIN:-$(dirname "$0")/../bin/tts-stream}"
+    [ -x "$TTS_STREAM" ] || TTS_STREAM="tts-stream"
+    date +%s > "$STAMP_DIR/claude-tts-stop-last"
+    # tts-stream's concat archive lands in /tmp/tts-llm without a `.play`
+    # sidecar, so it coexists in the forwarder's watch list without
+    # re-triggering playback (segments already streamed live on voice).
+    printf '%s' "$text" | nohup "$TTS_STREAM" --no-tee >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+    exit 0
+fi
+
 # Hand off to tts-drop with --dedup-key so concurrent Stop invocations
 # (duplicate Stop, or Stop + tail Notification) collapse atomically.
 if printf '%s' "$text" | "$TTS_DROP" "${emit_args[@]}" --kind stop --dedup-key "$text" >/dev/null; then

@@ -70,6 +70,8 @@ except Exception:
       log "TTS: ${text:0:80}..."
       outfile="$TTS_DIR/$(make_stem ha announce).opus"
       if "$EDGE_TTS" --voice "$VOICE" --text "$text" --write-media "$outfile" 2>/dev/null; then
+        # Sidecar publish marker — forwarder/watcher inotify on `*.play`.
+        : > "${outfile}.play"
         log "TTS:OK ($outfile)"
       else
         log "TTS:FAILED"

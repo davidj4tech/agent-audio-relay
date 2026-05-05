@@ -32,20 +32,34 @@ ssh -o ConnectTimeout=5 "$REMOTE" "mkdir -p$remote_dirs" 2>/dev/null || true
 echo "[forwarder] watching ${WATCH_ROOTS[*]} -> $REMOTE:$REMOTE_BASE/" >&2
 
 inotifywait -m -q -e close_write -e moved_to --format '%w%f' "${WATCH_ROOTS[@]}" |
-while IFS= read -r path; do
-  case "$path" in
-    *.mp3|*.opus|*.ogg|*.wav) ;;
+while IFS= read -r marker; do
+  # Publish protocol: producers create `<audio>.play` *after* the audio
+  # is at its final path. We only react to the marker, so non-published
+  # files (e.g. tts-stream's concat archive) coexist in the watch dir
+  # without ever being forwarded.
+  case "$marker" in
+    *.play) ;;
     *) continue ;;
   esac
-  [ -f "$path" ] || continue
-  src_dir=$(basename "$(dirname "$path")")
+  audio="${marker%.play}"
+  case "$audio" in
+    *.mp3|*.opus|*.ogg|*.wav) ;;
+    *) rm -f "$marker"; continue ;;
+  esac
+  [ -f "$audio" ] || { rm -f "$marker"; continue; }
+  src_dir=$(basename "$(dirname "$audio")")
+  remote_dir="$REMOTE_BASE/$src_dir"
+  remote_audio="$remote_dir/$(basename "$audio")"
   # scp, not rsync: rsync's tmp-file+rename pattern doesn't fire
   # CLOSE_WRITE/MOVED_TO on Termux/Android, so the remote relay's
-  # inotifywait never sees rsync-delivered files.
-  if scp -q "$path" "$REMOTE:$REMOTE_BASE/$src_dir/" 2>/dev/null; then
-    rm -f "$path"
-    echo "[forwarder] sent $path -> $REMOTE:$REMOTE_BASE/$src_dir/" >&2
+  # inotifywait never sees rsync-delivered files. Emit the remote
+  # marker via ssh-touch *after* the audio scp lands, mirroring the
+  # local publish-after-rename ordering.
+  if scp -q "$audio" "$REMOTE:$remote_dir/" 2>/dev/null \
+       && ssh -o ConnectTimeout=5 "$REMOTE" "touch '$remote_audio.play'" 2>/dev/null; then
+    rm -f "$audio" "$marker"
+    echo "[forwarder] sent $audio -> $REMOTE:$remote_dir/" >&2
   else
-    echo "[forwarder] FAILED $path (will retry on next event)" >&2
+    echo "[forwarder] FAILED $audio (will retry on next event)" >&2
   fi
 done

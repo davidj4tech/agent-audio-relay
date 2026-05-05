@@ -177,5 +177,11 @@ if [ ! -s "$staging" ]; then
 fi
 
 mv "$staging" "$final"
+# Publish via sidecar marker. Forwarder + watcher.py inotify on `*.play`
+# only, so files written to a watched dir without a marker (e.g.
+# tts-stream's concat archive) don't trigger playback. The marker is
+# created strictly after the audio is at its final path so consumers
+# never race against a partial file.
+: > "${final}.play"
 log "wrote $final"
 printf '%s\n' "$final"
