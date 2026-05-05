@@ -330,6 +330,64 @@ case "${1:-}" in
         ;;
     playlist-prev) mpv_cmd '{"command":["playlist-prev"]}' >/dev/null ;;
     playlist-next) mpv_cmd '{"command":["playlist-next"]}' >/dev/null ;;
+    prev-history|next-history)
+        # Walk the per-channel play history kept in mpv's user-data
+        # (populated by mpv-mcp on every play/queue). Mirrors the smart
+        # behavior of `prev`/`next` for tts:
+        #   prev when >5s into current clip → restart current
+        #   next when at newest             → seek to end (dismiss)
+        direction="$1"
+        if [ "$direction" = "prev-history" ]; then
+            cur_pos=$(mpv_get time-pos)
+            if [ -n "$cur_pos" ] && [ "$cur_pos" != "null" ] \
+                && awk -v p="$cur_pos" 'BEGIN{exit !(p > 5)}'; then
+                mpv_cmd '{"command":["seek",0,"absolute"]}' >/dev/null
+                exit 0
+            fi
+        fi
+        # Read current history + cursor in one round-trip.
+        mapfile -t _hist < <(mpv_batch_get user-data/aar/history user-data/aar/history-cursor)
+        _hist_json="${_hist[0]:-}"
+        _cursor="${_hist[1]:-}"
+        [ -z "$_hist_json" ] || [ "$_hist_json" = "null" ] && exit 0
+        _len=$(printf '%s' "$_hist_json" | jq 'length' 2>/dev/null)
+        [ -z "$_len" ] || [ "$_len" = "0" ] && exit 0
+        # Default cursor to newest if mpv-mcp didn't write one.
+        case "$_cursor" in ''|null) _cursor=$((_len - 1)) ;; esac
+        if [ "$direction" = "prev-history" ]; then
+            _next=$((_cursor - 1))
+            [ "$_next" -lt 0 ] && exit 0  # already at oldest
+        else
+            _next=$((_cursor + 1))
+            if [ "$_next" -ge "$_len" ]; then
+                # At newest — mirror tts smart-next: seek to end of current clip.
+                _dur=$(mpv_get duration)
+                if [ -n "$_dur" ] && [ "$_dur" != "null" ]; then
+                    mpv_cmd "{\"command\":[\"seek\",${_dur},\"absolute\"]}" >/dev/null
+                fi
+                exit 0
+            fi
+        fi
+        _url=$(printf '%s' "$_hist_json" | jq -r ".[$_next].url" 2>/dev/null)
+        [ -z "$_url" ] || [ "$_url" = "null" ] && exit 0
+        mpv_cmd "{\"command\":[\"loadfile\",$(printf '%s' "$_url" | jq -R .),\"replace\"]}" >/dev/null
+        mpv_cmd '{"command":["set_property","pause",false]}' >/dev/null
+        mpv_cmd "{\"command\":[\"set_property\",\"user-data/aar/history-cursor\",${_next}]}" >/dev/null
+        ;;
+    play-latest-history)
+        # Load the most recent entry from per-channel history. Used by
+        # the popup's Space-on-idle for music/voice channels (no
+        # session-archive equivalent for those).
+        mapfile -t _hist < <(mpv_batch_get user-data/aar/history)
+        _hist_json="${_hist[0]:-}"
+        [ -z "$_hist_json" ] || [ "$_hist_json" = "null" ] && exit 0
+        _url=$(printf '%s' "$_hist_json" | jq -r '.[-1].url' 2>/dev/null)
+        _len=$(printf '%s' "$_hist_json" | jq 'length' 2>/dev/null)
+        [ -z "$_url" ] || [ "$_url" = "null" ] && exit 0
+        mpv_cmd "{\"command\":[\"loadfile\",$(printf '%s' "$_url" | jq -R .),\"replace\"]}" >/dev/null
+        mpv_cmd '{"command":["set_property","pause",false]}' >/dev/null
+        mpv_cmd "{\"command\":[\"set_property\",\"user-data/aar/history-cursor\",$((_len - 1))]}" >/dev/null
+        ;;
     seek)    mpv_cmd "{\"command\":[\"seek\",${2:-5},\"relative\"]}"   >/dev/null ;;
     seek-percent) mpv_cmd "{\"command\":[\"seek\",${2:-50},\"absolute-percent\"]}" >/dev/null ;;
     start)   mpv_cmd '{"command":["seek",0,"absolute"]}'               >/dev/null ;;

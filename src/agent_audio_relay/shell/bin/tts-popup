@@ -651,8 +651,22 @@ while true; do
     _select_channel
     _publish_sock
     case "$key" in
-        ' '|p) ctl toggle "$SESSION" >/dev/null 2>&1 & disown
-             LOAD_PENDING_SINCE=$SECONDS; LAST_KEY="space" ;;
+        ' '|p)
+            # tts: session-pinned toggle (replays archive's latest if idle).
+            # music/voice: toggle if a clip is loaded; otherwise load the
+            # newest from per-channel history (mpv-mcp records every play).
+            if [ "$CHANNEL" = "tts" ]; then
+                ctl toggle "$SESSION" >/dev/null 2>&1 & disown
+            else
+                _cur_path="${STATE[5]:-}"
+                if [ -n "$_cur_path" ] && [ "$_cur_path" != "null" ]; then
+                    ctl toggle >/dev/null 2>&1 & disown
+                else
+                    ctl play-latest-history >/dev/null 2>&1 & disown
+                fi
+            fi
+            LOAD_PENDING_SINCE=$SECONDS; LAST_KEY="space"
+            ;;
         r)
             # tts: replay this session's latest archived clip.
             # music/voice: no archive — restart the currently-loaded track.
@@ -675,11 +689,11 @@ while true; do
         ']') ctl faster   >/dev/null 2>&1 & disown; LAST_KEY="faster" ;;
         '<')
             # tts: walk this session's archive backward.
-            # music/voice: walk mpv's playlist backward.
+            # music/voice: walk per-channel play history backward.
             if [ "$CHANNEL" = "tts" ]; then
                 ctl prev "$SESSION" >/dev/null 2>&1 & disown
             else
-                ctl playlist-prev >/dev/null 2>&1 & disown
+                ctl prev-history >/dev/null 2>&1 & disown
             fi
             LOAD_PENDING_SINCE=$SECONDS; LAST_KEY="prev"
             ;;
@@ -687,7 +701,7 @@ while true; do
             if [ "$CHANNEL" = "tts" ]; then
                 ctl next "$SESSION" >/dev/null 2>&1 & disown
             else
-                ctl playlist-next >/dev/null 2>&1 & disown
+                ctl next-history >/dev/null 2>&1 & disown
             fi
             LOAD_PENDING_SINCE=$SECONDS; LAST_KEY="next"
             ;;
