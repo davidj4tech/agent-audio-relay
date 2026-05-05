@@ -111,7 +111,7 @@ bar() {
 # Fetch full state for one channel via tts-ctl --socket. Echoes the five
 # props on stdout, one per line (matching mapfile expectations below).
 _fetch_state() {
-    "$TTS_CTL" --socket "$1" get pause idle-active time-pos duration mute path 2>/dev/null
+    "$TTS_CTL" --socket "$1" get pause idle-active time-pos duration mute path user-data/aar/session 2>/dev/null
 }
 
 # Pull the source session out of the playing path. Two shapes to handle:
@@ -149,13 +149,18 @@ _session_from_path() {
 # crossed, which is the only time the rendered string actually changes.
 _render_channel() {
     local prefix="$1"; shift
-    local paused="${1:-}" idle="${2:-}" pos="${3:-}" dur="${4:-}" mute="${5:-}" path="${6:-}"
+    local paused="${1:-}" idle="${2:-}" pos="${3:-}" dur="${4:-}" mute="${5:-}" path="${6:-}" tagged_session="${7:-}"
     local state mute_suffix
     # Source session goes into the bar as an overlay (see bar()) when it
-    # differs from the viewer's tmux session. Same-session (and live
-    # streams with no parseable path) get an empty label → plain █░ bar.
+    # differs from the viewer's tmux session. Path-encoded session wins
+    # (tts-drop's denote stem); falls back to the loader-tagged
+    # user-data/aar/session (set by tts-stream and mpv-mcp on loadfile)
+    # when the path is unparseable (live URLs, YouTube streams, etc).
     local src_session bar_label=""
     src_session=$(_session_from_path "$path")
+    if [ -z "$src_session" ] && [ -n "$tagged_session" ] && [ "$tagged_session" != "null" ]; then
+        src_session="$tagged_session"
+    fi
     if [ -n "$src_session" ] \
         && [ "$src_session" != "nosession" ] \
         && [ "$src_session" != "$_viewer_session" ]; then
@@ -212,17 +217,17 @@ render() {
     # Try tts first (no channel prefix — keeps the historical look when
     # only tts is in use).
     mapfile -t v < <(_fetch_state "$_TTS_SOCK")
-    _render_channel "" "${v[@]:0:6}"; rc=$?
+    _render_channel "" "${v[@]:0:7}"; rc=$?
     [ $rc -eq 0 ] && return 0
     [ $rc -eq 2 ] && _had_failure=1
     # Then voice.
     mapfile -t v < <(_fetch_state "$_VOICE_SOCK")
-    _render_channel "[v] " "${v[@]:0:6}"; rc=$?
+    _render_channel "[v] " "${v[@]:0:7}"; rc=$?
     [ $rc -eq 0 ] && return 0
     [ $rc -eq 2 ] && _had_failure=1
     # Then music.
     mapfile -t v < <(_fetch_state "$_MUSIC_SOCK")
-    _render_channel "[m] " "${v[@]:0:6}"; rc=$?
+    _render_channel "[m] " "${v[@]:0:7}"; rc=$?
     [ $rc -eq 0 ] && return 0
     [ $rc -eq 2 ] && _had_failure=1
 

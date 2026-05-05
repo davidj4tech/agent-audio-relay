@@ -115,6 +115,15 @@ _probe_idle() {
 
 CHANNEL="tts"
 _SOCK=""
+# Manual channel pin set by Tab. Empty = auto (priority pick).
+# Holds the channel name (tts/voice/music). _select_channel honours
+# this until the pinned channel goes idle, at which point the pin is
+# dropped and auto-pick resumes.
+_MANUAL_PIN=""
+# Set by _select_channel: 1 if at least one *other* channel besides
+# CHANNEL is non-idle. draw() uses this to show a `›` cycle-affordance
+# next to the channel marker.
+_HAS_ALT_CHANNEL=0
 
 # _select_channel: refresh _SOCK + CHANNEL based on the current state
 # of the three channel sockets. Called at startup, then again before
@@ -137,7 +146,27 @@ _select_channel() {
     fi
     if [ -n "${MPV_TTS_SOCK:-}" ]; then
         _SOCK="$MPV_TTS_SOCK"; CHANNEL="tts"
+        _HAS_ALT_CHANNEL=0
         return
+    fi
+    # Manual pin from Tab. Held for the lifetime of the popup
+    # (cleared only by another Tab moving to a different channel).
+    # We deliberately don't release on idle — the whole point of Tab
+    # cycling through idle channels is to reach their last clip for
+    # replay; auto-snapping back would defeat that.
+    if [ -n "$_MANUAL_PIN" ]; then
+        local _pin_sock=""
+        case "$_MANUAL_PIN" in
+            tts)   _pin_sock="$_tts_sock" ;;
+            voice) _pin_sock="$_voice_sock" ;;
+            music) _pin_sock="$_music_sock" ;;
+        esac
+        if [ -n "$_pin_sock" ] && [ -S "$_pin_sock" ]; then
+            _SOCK="$_pin_sock"; CHANNEL="$_MANUAL_PIN"
+            _refresh_alt_marker
+            return
+        fi
+        _MANUAL_PIN=""
     fi
     if [ -S "$_tts_sock" ] || [ -S "$_voice_sock" ] || [ -S "$_music_sock" ]; then
         if [ "$(_probe_idle "$_tts_sock")" = "active" ]; then
@@ -153,9 +182,65 @@ _select_channel() {
         else
             _SOCK="$_music_sock"; CHANNEL="music"
         fi
+        _refresh_alt_marker
         return
     fi
     _SOCK="$_phone_tts_sock"; CHANNEL="tts"
+    _HAS_ALT_CHANNEL=0
+}
+
+# Set _HAS_ALT_CHANNEL=1 if any other channel has a path loaded
+# (active OR paused-with-clip). The marker is meant to signal "Tab
+# will land on a channel that has something to interact with" — pure
+# idle-active would hide channels whose last clip just finished but
+# is still replayable.
+_refresh_alt_marker() {
+    _HAS_ALT_CHANNEL=0
+    local _ch _s _r
+    for _ch in tts voice music; do
+        [ "$_ch" = "$CHANNEL" ] && continue
+        case "$_ch" in
+            tts)   _s="$_tts_sock" ;;
+            voice) _s="$_voice_sock" ;;
+            music) _s="$_music_sock" ;;
+        esac
+        [ -S "$_s" ] || continue
+        _r=$(printf '%s\n' '{"command":["get_property","path"]}' \
+            | socat -T 1 - "UNIX-CONNECT:$_s" 2>/dev/null \
+            | jq -r 'select(.error=="success")|.data' 2>/dev/null | head -n1)
+        if [ -n "$_r" ] && [ "$_r" != "null" ]; then
+            _HAS_ALT_CHANNEL=1
+            return
+        fi
+    done
+}
+
+# Tab handler: rotate to the next channel in tts→voice→music order
+# regardless of idle state, so the user can navigate to a channel
+# whose last clip has finished and replay/seek it. Skips channels
+# whose socket isn't present at all. Sets _MANUAL_PIN so subsequent
+# _select_channel calls don't snap back to the priority pick.
+_cycle_channel() {
+    local order=(tts voice music)
+    local n=${#order[@]} i start=0
+    for ((i=0; i<n; i++)); do
+        if [ "${order[i]}" = "$CHANNEL" ]; then start=$i; break; fi
+    done
+    for ((i=1; i<=n; i++)); do
+        local cand="${order[((start+i)%n)]}"
+        local sock=""
+        case "$cand" in
+            tts)   sock="$_tts_sock" ;;
+            voice) sock="$_voice_sock" ;;
+            music) sock="$_music_sock" ;;
+        esac
+        [ -S "$sock" ] || continue
+        _MANUAL_PIN="$cand"
+        _SOCK="$sock"; CHANNEL="$cand"
+        _refresh_alt_marker
+        return 0
+    done
+    return 1
 }
 
 _select_channel
@@ -277,7 +362,9 @@ draw() {
     paused="${STATE[0]:-}"; idle="${STATE[1]:-}"; pos="${STATE[2]:-}"
     dur="${STATE[3]:-}";    vol="${STATE[4]:-}";  path="${STATE[5]:-}"
     mute="${STATE[6]:-}"
-    local fetch_ts="${STATE[7]:-}"
+    local title="${STATE[7]:-}"
+    local chapter_title="${STATE[8]:-}"
+    local fetch_ts="${STATE[9]:-}"
     IDLE="$idle"
     # Interpolate time-pos between fetches so the progress bar moves
     # smoothly. Only when actively playing — paused/idle/eof should hold.
@@ -324,20 +411,30 @@ draw() {
         elif [ "$CHANNEL" = "tts" ]; then
             label=$(nowplaying_label "$path")
         else
-            # music/voice clips don't follow the tts stem format, so use
-            # the file basename (sans ext) as a best-effort title.
-            local _b="${path##*/}"
-            label="${_b%.*}"
+            # music/voice: prefer the current chapter title if mpv has
+            # one (yt-dlp turns YouTube chapter markers into mpv's chapter
+            # list, and chapter-metadata/title tracks the playhead). Fall
+            # back to media-title (real video title for YouTube, embedded
+            # tag or filename for local files), then to basename.
+            if [ -n "$chapter_title" ] && [ "$chapter_title" != "null" ]; then
+                label="$chapter_title"
+            elif [ -n "$title" ] && [ "$title" != "null" ]; then
+                label="$title"
+            else
+                local _b="${path##*/}"
+                label="${_b%.*}"
+            fi
         fi
     fi
-    # Channel marker — empty for tts (the historical default look) so
-    # popups that only ever drive tts visually don't change. `[v]`/`[m]`
-    # for the new channels so the user can tell which channel they're
-    # controlling at a glance.
-    local channel_prefix=""
+    # Channel marker — empty for tts when no other channel is also
+    # non-idle (preserves the historical tts-only look). When another
+    # channel is non-idle, append `›` to show Tab will cycle there.
+    local channel_prefix="" alt_marker=""
+    [ "$_HAS_ALT_CHANNEL" = "1" ] && alt_marker="›"
     case "$CHANNEL" in
-        voice) channel_prefix="[v] " ;;
-        music) channel_prefix="[m] " ;;
+        voice) channel_prefix="[v]${alt_marker} " ;;
+        music) channel_prefix="[m]${alt_marker} " ;;
+        tts)   [ -n "$alt_marker" ] && channel_prefix="[t]${alt_marker} " ;;
     esac
     local mute_suffix=""
     [ "$mute" = "true" ] && mute_suffix=' [M]'
@@ -404,7 +501,7 @@ declare -a STATE
 # per REFRESH.
 _refetch_state() {
     {
-        ctl get pause idle-active time-pos duration volume path mute \
+        ctl get pause idle-active time-pos duration volume path mute media-title chapter-metadata/title \
             && date +%s.%N
     } > "$STATE_FILE.tmp" 2>/dev/null \
         && mv -f "$STATE_FILE.tmp" "$STATE_FILE" 2>/dev/null
@@ -532,6 +629,15 @@ while true; do
             fi
             LOAD_PENDING_SINCE=$SECONDS; LAST_KEY="next"
             ;;
+        $'\t')
+            # Cycle to next non-idle channel (tts→voice→music→tts).
+            # Pins until the picked channel goes idle.
+            if _cycle_channel; then
+                LAST_KEY="ch:${CHANNEL}"
+            else
+                LAST_KEY="ch:none"
+            fi
+            ;;
         DELETE|$'\b'|$'\x7f') ctl speed 1 >/dev/null 2>&1 & disown; LAST_KEY="speed=1" ;;
         # mpv/VLC convention: digits 1-9 jump to N×10% of the clip.
         # 0 stays as seek-to-start (which is also 0% — consistent).
@@ -567,7 +673,7 @@ while true; do
             # geometry constraints. -d 0 means "stay until cleared by next
             # status update" (which happens within status-interval).
             tmux display-message -d 9000 \
-                "tts: Spc/p=togl r=replay 0=start 1-9=seek% h/l=±5s H/L=±30s -/=vol m=mute [/]=speed </>=prev/next Del=spd1 i=info q=quit" \
+                "tts: Spc/p=togl r=replay 0=start 1-9=seek% h/l=±5s H/L=±30s -/=vol m=mute [/]=speed </>=prev/next Tab=channel Del=spd1 i=info q=quit" \
                 2>/dev/null
             ;;
         q|$'\e') exit 0 ;;

@@ -546,6 +546,12 @@ class StreamRunner:
             self.errors.append(f"mpv loadfile {url}: {load_resp.get('error')}")
             return 1
         _mpv_send(self.args.socket, ["set_property", "pause", False])
+        # Tag the loaded URL with the producing tmux session so the
+        # status line / popup can attribute it (the URL itself carries
+        # no session info, unlike denote-stem'd archive paths).
+        if self.args.session:
+            _mpv_send(self.args.socket,
+                      ["set_property", "user-data/aar/session", self.args.session])
 
         buf = ""
         seq = 0
