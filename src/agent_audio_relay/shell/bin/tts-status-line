@@ -33,7 +33,13 @@ TTL_PLAYING="${TTS_STATUS_TTL_PLAYING:-1}"
 TTL_IDLE="${TTS_STATUS_TTL_IDLE:-5}"
 
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/agent-audio-relay"
-CACHE_FILE="$CACHE_DIR/status-line.cache"
+# Cache is keyed on the *viewer's* tmux session so two clients in
+# different sessions don't share a cached "[othersess] " prefix
+# decision (which is computed by comparing the playback path's encoded
+# session to the viewer's session — see _render_channel).
+_viewer_session=$(tmux display-message -p '#S' 2>/dev/null | tr -c 'A-Za-z0-9-' '_')
+_viewer_session="${_viewer_session:-_nosess}"
+CACHE_FILE="$CACHE_DIR/status-line.${_viewer_session}.cache"
 LOCK_FILE="$CACHE_FILE.lock"
 mkdir -p "$CACHE_DIR" 2>/dev/null
 
@@ -55,7 +61,7 @@ fmt_time() {
 }
 
 bar() {
-    local pos="$1" dur="$2" width="$3" filled empty pad fill rest
+    local pos="$1" dur="$2" width="$3" label="${4:-}" filled empty pad fill rest
     if [ -z "$pos" ] || [ -z "$dur" ] || [ "$pos" = "null" ] || [ "$dur" = "null" ]; then
         printf -v pad '%*s' "$width" ''
         printf '%s' "${pad// /─}"
@@ -63,6 +69,32 @@ bar() {
     fi
     filled=$(awk -v p="$pos" -v d="$dur" -v w="$width" \
         'BEGIN{ if(d<=0){print 0; exit} f=int((p/d)*w); if(f<0)f=0; if(f>w)f=w; print f }')
+    # Overlay mode: when we have a label (source session != viewer
+    # session), render the bar as coloured background cells with the
+    # label's characters overlaid in the middle. Filled cells get a
+    # brighter bg, empty cells a dimmer bg, so the progress is visible
+    # *behind* the text. Falls back to the plain █░ rendering when no
+    # label — same look as before for the common same-session case.
+    if [ -n "$label" ]; then
+        local filled_bg="${TTS_STATUS_FILLED_BG:-colour240}"
+        local empty_bg="${TTS_STATUS_EMPTY_BG:-colour236}"
+        local lbl="$label"
+        [ "${#lbl}" -gt "$width" ] && lbl="${lbl:0:$width}"
+        local lpad=$(( (width - ${#lbl}) / 2 ))
+        local i ch bg out=""
+        for ((i=0; i<width; i++)); do
+            if [ "$i" -lt "$filled" ]; then bg="$filled_bg"; else bg="$empty_bg"; fi
+            if [ "$i" -ge "$lpad" ] && [ "$i" -lt "$((lpad + ${#lbl}))" ]; then
+                ch="${lbl:$((i-lpad)):1}"
+            else
+                ch=' '
+            fi
+            out+="#[bg=${bg}]${ch}"
+        done
+        out+="#[bg=default]"
+        printf '%s' "$out"
+        return
+    fi
     empty=$((width - filled))
     fill=""; rest=""
     if [ "$filled" -gt 0 ]; then
@@ -79,7 +111,23 @@ bar() {
 # Fetch full state for one channel via tts-ctl --socket. Echoes the five
 # props on stdout, one per line (matching mapfile expectations below).
 _fetch_state() {
-    "$TTS_CTL" --socket "$1" get pause idle-active time-pos duration mute 2>/dev/null
+    "$TTS_CTL" --socket "$1" get pause idle-active time-pos duration mute path 2>/dev/null
+}
+
+# Pull the source session out of the playing path. Two shapes to handle:
+#   YYYYMMDDTHHMMSS--<host>--<session>__<persona>_<agent>_<kind>.<ext>  (archived)
+#   latest--<host>--<session>.<ext>                                     (symlink)
+# Returns empty string if neither matches (e.g. tts-stream's
+# http://host:port/stream.mp3 URL).
+_session_from_path() {
+    local p="$1" base
+    [ -z "$p" ] && return 0
+    base="${p##*/}"
+    if [[ "$base" =~ ^latest--[^-]+--([^.]+)\. ]]; then
+        printf '%s' "${BASH_REMATCH[1]}"
+    elif [[ "$base" =~ --[^-]+--([^_]+)__ ]]; then
+        printf '%s' "${BASH_REMATCH[1]}"
+    fi
 }
 
 # Render one channel's state as a status-line string given the channel's
@@ -101,8 +149,18 @@ _fetch_state() {
 # crossed, which is the only time the rendered string actually changes.
 _render_channel() {
     local prefix="$1"; shift
-    local paused="${1:-}" idle="${2:-}" pos="${3:-}" dur="${4:-}" mute="${5:-}"
+    local paused="${1:-}" idle="${2:-}" pos="${3:-}" dur="${4:-}" mute="${5:-}" path="${6:-}"
     local state mute_suffix
+    # Source session goes into the bar as an overlay (see bar()) when it
+    # differs from the viewer's tmux session. Same-session (and live
+    # streams with no parseable path) get an empty label → plain █░ bar.
+    local src_session bar_label=""
+    src_session=$(_session_from_path "$path")
+    if [ -n "$src_session" ] \
+        && [ "$src_session" != "nosession" ] \
+        && [ "$src_session" != "$_viewer_session" ]; then
+        bar_label="$src_session"
+    fi
     # If both paused and idle-active came back empty, the IPC fetch
     # failed (vs mpv answering "I'm idle" which would set idle=true).
     if [ -z "$paused" ] && [ -z "$idle" ]; then
@@ -132,7 +190,7 @@ _render_channel() {
     printf '%s%s %s %s%s' \
         "$prefix" \
         "$state" \
-        "$(bar "$pos" "$dur" "$BAR_WIDTH")" \
+        "$(bar "$pos" "$dur" "$BAR_WIDTH" "$bar_label")" \
         "$(fmt_time "$dur")" \
         "$mute_suffix"
     return 0
@@ -154,17 +212,17 @@ render() {
     # Try tts first (no channel prefix — keeps the historical look when
     # only tts is in use).
     mapfile -t v < <(_fetch_state "$_TTS_SOCK")
-    _render_channel "" "${v[@]:0:5}"; rc=$?
+    _render_channel "" "${v[@]:0:6}"; rc=$?
     [ $rc -eq 0 ] && return 0
     [ $rc -eq 2 ] && _had_failure=1
     # Then voice.
     mapfile -t v < <(_fetch_state "$_VOICE_SOCK")
-    _render_channel "[v] " "${v[@]:0:5}"; rc=$?
+    _render_channel "[v] " "${v[@]:0:6}"; rc=$?
     [ $rc -eq 0 ] && return 0
     [ $rc -eq 2 ] && _had_failure=1
     # Then music.
     mapfile -t v < <(_fetch_state "$_MUSIC_SOCK")
-    _render_channel "[m] " "${v[@]:0:5}"; rc=$?
+    _render_channel "[m] " "${v[@]:0:6}"; rc=$?
     [ $rc -eq 0 ] && return 0
     [ $rc -eq 2 ] && _had_failure=1
 
