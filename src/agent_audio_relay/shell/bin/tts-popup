@@ -347,6 +347,16 @@ LAST_KEY=""
 LAST_KEY_AT=0
 KEY_FEEDBACK_US=700000  # 0.7 seconds
 
+# Marquee state. When the rendered label is wider than the available
+# column budget, draw() scrolls it one cell per tick like a news ticker.
+# Offset resets whenever the label text changes (new clip / new chapter)
+# so the start is always readable; SCROLL_HOLD_TICKS pauses briefly at
+# offset 0 before scrolling so a label that just-fits doesn't whip past.
+LAST_LABEL=""
+SCROLL_OFFSET=0
+SCROLL_HOLD_TICKS=6
+SCROLL_HOLD_COUNT=0
+
 # now_us — microseconds since epoch as an integer. EPOCHREALTIME is
 # "<sec>.<usec>"; stripping the dot gives us a usable unsigned integer.
 _now_us() { printf '%s' "${EPOCHREALTIME/./}"; }
@@ -416,13 +426,14 @@ draw() {
             # list, and chapter-metadata/title tracks the playhead). Fall
             # back to media-title (real video title for YouTube, embedded
             # tag or filename for local files), then to basename.
-            if [ -n "$chapter_title" ] && [ "$chapter_title" != "null" ]; then
-                label="$chapter_title"
-            elif [ -n "$title" ] && [ "$title" != "null" ]; then
+            if [ -n "$title" ] && [ "$title" != "null" ]; then
                 label="$title"
             else
                 local _b="${path##*/}"
                 label="${_b%.*}"
+            fi
+            if [ -n "$chapter_title" ] && [ "$chapter_title" != "null" ]; then
+                label="${label} › ${chapter_title}"
             fi
         fi
     fi
@@ -450,6 +461,34 @@ draw() {
             LAST_KEY=""
         fi
     fi
+    # Marquee: if the assembled body would overflow the popup width,
+    # scroll the label one cell per draw tick. The visible window is
+    # cut from a ring buffer (label + separator) so it loops smoothly.
+    local _cols="${COLUMNS:-0}"
+    [ "$_cols" -le 0 ] && _cols=$(tput cols 2>/dev/null || echo 20)
+    local _fixed_w=$(( ${#state} + 1 + ${#channel_prefix} + ${#mute_suffix} + ${#key_suffix} ))
+    local _avail=$(( _cols - _fixed_w ))
+    [ "$_avail" -lt 4 ] && _avail=4
+    if [ "$label" != "$LAST_LABEL" ]; then
+        SCROLL_OFFSET=0
+        SCROLL_HOLD_COUNT=0
+        LAST_LABEL="$label"
+    fi
+    if [ "${#label}" -gt "$_avail" ]; then
+        local _sep="   ·   "
+        local _ring="${label}${_sep}"
+        local _rlen=${#_ring}
+        local _off=$(( SCROLL_OFFSET % _rlen ))
+        local _win="${_ring:_off}${_ring}"
+        label="${_win:0:$_avail}"
+        if [ "$SCROLL_OFFSET" -eq 0 ] && [ "$SCROLL_HOLD_COUNT" -lt "$SCROLL_HOLD_TICKS" ]; then
+            SCROLL_HOLD_COUNT=$(( SCROLL_HOLD_COUNT + 1 ))
+        else
+            SCROLL_OFFSET=$(( (SCROLL_OFFSET + 1) % _rlen ))
+            SCROLL_HOLD_COUNT=0
+        fi
+    fi
+
     # Build the whole frame in one buffer and emit with a single printf.
     # tmux's popup renderer applies the entire write atomically, so the
     # user never sees the bar half-drawn or the label arrive before the
