@@ -302,26 +302,34 @@ class _StreamHandler(http.server.BaseHTTPRequestHandler):
 
     def do_HEAD(self) -> None:
         # ffmpeg's HTTP demuxer sometimes probes with HEAD before
-        # GETting the bytes. Answer with the headers a Range-capable
-        # consumer wants to see.
+        # GETting the bytes. While the stream is still growing we hide
+        # range support — see do_GET for why.
+        seekable = self.stream_buffer.complete
         self.send_response(200)
         self.send_header("Content-Type", "audio/mpeg")
-        self.send_header("Accept-Ranges", "bytes")
+        if seekable:
+            self.send_header("Accept-Ranges", "bytes")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "close")
         self.end_headers()
 
     def do_GET(self) -> None:
         start = self._parse_range()
-        is_range = self.headers.get("Range", "").startswith("bytes=")
-        # 206 only if we got a Range header, else 200. Some clients are
-        # picky about the distinction.
+        # Only honour Range / advertise seekability once the buffer is
+        # finalized. While we're still streaming, advertising
+        # Accept-Ranges makes mpv treat the URL as a seekable file and
+        # seek-back-to-zero after probing the MP3 header — which
+        # causes the opening bytes (the first segment) to be decoded
+        # and played twice. Behave like an Icecast endpoint until
+        # complete.
+        seekable = self.stream_buffer.complete
+        is_range = seekable and self.headers.get("Range", "").startswith("bytes=")
+        if not seekable:
+            start = 0
         self.send_response(206 if is_range else 200)
         self.send_header("Content-Type", "audio/mpeg")
-        # Advertising Accept-Ranges is what tells mpv it can seek. The
-        # actual seekability comes from us serving from arbitrary
-        # offsets in the buffer.
-        self.send_header("Accept-Ranges", "bytes")
+        if seekable:
+            self.send_header("Accept-Ranges", "bytes")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "close")
         if is_range:
