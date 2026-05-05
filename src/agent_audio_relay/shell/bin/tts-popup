@@ -532,6 +532,18 @@ LOAD_PENDING_SINCE=
 STATE_FILE=$(mktemp -t tts-popup-state.XXXXXX)
 declare -a STATE
 
+# Channel-sync file. The background fetcher runs in a forked subshell,
+# so it can't see parent-side changes to $_SOCK after Tab cycles. The
+# parent writes the current socket path here each time the channel
+# changes; the fetcher re-reads it on every iteration so the displayed
+# ticker tracks the selected channel instead of staying pinned to
+# whatever was active when the popup opened.
+SOCK_FILE=$(mktemp -t tts-popup-sock.XXXXXX)
+_publish_sock() {
+    printf '%s\n' "$_SOCK" > "$SOCK_FILE.tmp" 2>/dev/null \
+        && mv -f "$SOCK_FILE.tmp" "$SOCK_FILE" 2>/dev/null
+}
+
 # Refetch state out-of-band. Used both by the periodic fetcher and as a
 # kick after every keypress (so the display updates promptly once the
 # action's effect lands on mpv, instead of waiting for the next REFRESH).
@@ -546,9 +558,19 @@ _refetch_state() {
         && mv -f "$STATE_FILE.tmp" "$STATE_FILE" 2>/dev/null
 }
 
+# Seed SOCK_FILE before forking the fetcher so its first iteration
+# already has the current channel.
+_publish_sock
+
 # Background fetcher: writes one full state snapshot per REFRESH seconds.
+# Re-reads SOCK_FILE each iteration so a Tab cycle in the parent shell
+# is picked up on the next tick (without this, the fetcher would keep
+# polling whichever channel was current at popup-open time).
 (
     while true; do
+        if [ -s "$SOCK_FILE" ]; then
+            _SOCK=$(cat "$SOCK_FILE")
+        fi
         _refetch_state
         sleep "$REFRESH"
     done
@@ -560,7 +582,7 @@ _cleanup() {
     # cursor blink showing as flicker).
     printf '\033[?25h'
     kill "$FETCH_PID" 2>/dev/null
-    rm -f "$STATE_FILE" "$STATE_FILE.tmp" "$HELP_FILE"
+    rm -f "$STATE_FILE" "$STATE_FILE.tmp" "$SOCK_FILE" "$SOCK_FILE.tmp" "$HELP_FILE"
     if [ -n "$_CTL_PATH" ] && [ -S "$_CTL_PATH" ]; then
         ssh -O exit -o ControlPath="$_CTL_PATH" "$_PHONE_HOST" 2>/dev/null
     fi
@@ -627,6 +649,7 @@ while true; do
     # background fetcher uses whatever _SOCK is current on its next
     # tick — no extra wiring needed.
     _select_channel
+    _publish_sock
     case "$key" in
         ' '|p) ctl toggle "$SESSION" >/dev/null 2>&1 & disown
              LOAD_PENDING_SINCE=$SECONDS; LAST_KEY="space" ;;
@@ -672,6 +695,7 @@ while true; do
             # Cycle to next non-idle channel (tts→voice→music→tts).
             # Pins until the picked channel goes idle.
             if _cycle_channel; then
+                _publish_sock
                 LAST_KEY="ch:${CHANNEL}"
             else
                 LAST_KEY="ch:none"
