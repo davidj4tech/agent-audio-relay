@@ -77,8 +77,10 @@ the simplest setup.
 **Two-host (sender + player).** Hooks run on a headless host (e.g. a
 Pi running Claude Code) but you want the audio on a different machine
 (e.g. an Android phone in Termux running mpv with mpv-tts.sock). The
-sender runs `agent-audio-relay-forwarder.sh`, which inotify-watches its
-local `/tmp/tts-*` drop dirs and `scp`s each new clip to the player's
+sender runs `agent-audio-relay-forwarder.sh`, which inotify-watches
+its local `/tmp/tts-*` drop dirs for `*.play` markers (see
+[Publish protocol](#publish-protocol-play-markers) below) and `scp`s
+the audio + marker pair to the player's
 `~/.cache/agent-audio-relay/<src_dir>/`. The player runs
 `agent-audio-relay` with `RELAY_BACKEND=mpv`, watching that same
 directory and archiving played clips into
@@ -94,12 +96,13 @@ multi-channel ducking that requires mpv-mcp on the player side.
 
 ## Watcher daemon (core)
 
-The `agent-audio-relay` command watches directories for new audio files
-(`mp3`/`opus`/`ogg`/`wav`) dropped into any `tts-*` subdirectory, queues
-them, optionally pads 1s of silence (avoids Edge TTS last-word
-clipping), and delivers them through the configured playback backend.
-Back-to-back messages are sequenced — it waits for current playback to
-finish before starting the next.
+The `agent-audio-relay` command watches directories for `*.play`
+publish markers (see [Publish protocol](#publish-protocol-play-markers)
+below) in any `tts-*` subdirectory, queues the corresponding audio
+file (`mp3`/`opus`/`ogg`/`wav`), optionally pads 1s of silence (avoids
+Edge TTS last-word clipping), and delivers it through the configured
+playback backend. Back-to-back messages are sequenced — it waits for
+current playback to finish before starting the next.
 
 Hooks name their clips with a denote-style stem
 (`YYYYMMDDTHHMMSS--<host>--<session>__<persona>_<agent>_<kind>.<ext>`)
@@ -124,6 +127,34 @@ agent-audio-relay
 | `RELAY_WATCH_DIRS` | `~/.cache/agent-audio-relay` | Colon-separated dirs to watch |
 | `RELAY_QUEUE_DIR` | `/tmp/agent-audio-relay-queue` | Local queue directory (set to `$XDG_RUNTIME_DIR/agent-audio-relay-queue` under systemd to avoid cross-user `/tmp` collisions — see the shipped unit) |
 | `RELAY_PAD_SILENCE` | `1` | Pad 1s silence onto audio (`1` or `0`) |
+
+### Publish protocol (`.play` markers)
+
+Drop dirs use an **opt-in publish marker**. An audio file is only
+played if a `<audio>.play` sidecar exists alongside it. Producers
+write the audio to its final path (atomic rename), then create the
+empty marker:
+
+```sh
+mv "$staging" /tmp/tts-claude/foo.mp3
+: > /tmp/tts-claude/foo.mp3.play   # publish
+```
+
+The forwarder and watcher inotify on `*.play` only. Files dropped
+without a marker (e.g. `tts-stream`'s concatenated archive that
+already streamed live on the voice channel) coexist in the watch dir
+without re-triggering playback. Consumers `unlink` the marker after
+handling, and they drain any pre-existing markers at startup so a
+restart doesn't lose events that fired during downtime.
+
+If you write a custom producer:
+- Put audio at its final path before creating the marker — consumers
+  resolve the audio by stripping `.play` from the marker name.
+- Use a real write (`: > marker` or `scp`/`cp` of an empty file). On
+  Termux/Android, `touch` uses `utimensat()` and silently fails to
+  fire `IN_CLOSE_WRITE`, so it doesn't work as a publish signal.
+- Don't drop unrelated files into a watched dir without a marker if
+  you don't want them played.
 
 ### Switching targets on the fly
 
