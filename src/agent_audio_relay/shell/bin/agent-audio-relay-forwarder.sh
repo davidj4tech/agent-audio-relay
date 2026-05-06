@@ -31,7 +31,14 @@ ssh -o ConnectTimeout=5 "$REMOTE" "mkdir -p$remote_dirs" 2>/dev/null || true
 
 echo "[forwarder] watching ${WATCH_ROOTS[*]} -> $REMOTE:$REMOTE_BASE/" >&2
 
-inotifywait -m -q -e close_write -e moved_to --format '%w%f' "${WATCH_ROOTS[@]}" |
+# Drain markers that landed while the forwarder was down, then start
+# inotify. Both feed the same while-loop, so "marker = publish" stays
+# the only contract anywhere — closes the migration-window hole where
+# events fired before subscription would otherwise be lost forever.
+{
+  find "${WATCH_ROOTS[@]}" -maxdepth 1 -type f -name '*.play' 2>/dev/null
+  inotifywait -m -q -e close_write -e moved_to --format '%w%f' "${WATCH_ROOTS[@]}"
+} |
 while IFS= read -r marker; do
   # Publish protocol: producers create `<audio>.play` *after* the audio
   # is at its final path. We only react to the marker, so non-published

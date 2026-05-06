@@ -277,6 +277,31 @@ def watch() -> None:
     # stay invisible until ~4KB accumulates — effectively never for one-line
     # events. stdbuf -oL forces line buffering. Newer inotifywait (≥ 4.x)
     # already flushes per line, so the prefix is harmless there.
+    # Drain markers that landed while the daemon was down. inotify only
+    # delivers events that fire *after* subscription, so any `.play`
+    # files already on disk would otherwise sit forever. Same code path
+    # as the inotify branch below — keeps "marker = publish" the only
+    # contract anywhere.
+    def _handle_marker(marker: str) -> None:
+        if not marker.endswith(".play"):
+            return
+        filepath = marker[:-len(".play")]
+        if "/tts-" not in filepath:
+            return
+        try:
+            os.unlink(marker)
+        except OSError:
+            pass
+        enqueue_file(filepath)
+        process_queue(resolve)
+        trim_state()
+
+    for d in WATCH_DIRS:
+        for root, _, files in os.walk(d):
+            for name in files:
+                if name.endswith(".play"):
+                    _handle_marker(os.path.join(root, name))
+
     inotify_cmd = ["inotifywait", "-m", "-r",
                    "-e", "close_write", "-e", "moved_to",
                    "--format", "%w%f"] + WATCH_DIRS
@@ -292,25 +317,13 @@ def watch() -> None:
         sys.exit(1)
 
     assert proc.stdout is not None
+    # Publish protocol: producers create `<audio>.play` *after* the
+    # audio file is at its final path. We only act on markers, so
+    # non-published audio (e.g. tts-stream's concat archive that
+    # already played live on a different channel) coexists in the
+    # watch dir without triggering playback.
     for line in proc.stdout:
-        marker = line.strip()
-        # Publish protocol: producers create `<audio>.play` *after* the
-        # audio file is at its final path. We only act on markers, so
-        # non-published audio (e.g. tts-stream's concat archive that
-        # already played live on a different channel) coexists in the
-        # watch dir without triggering playback.
-        if not marker.endswith(".play"):
-            continue
-        filepath = marker[:-len(".play")]
-        if "/tts-" not in filepath:
-            continue
-        try:
-            os.unlink(marker)
-        except OSError:
-            pass
-        enqueue_file(filepath)
-        process_queue(resolve)
-        trim_state()
+        _handle_marker(line.strip())
 
 
 def main() -> None:
