@@ -20,11 +20,21 @@
 # ssh-fork path until the tunnel is back, so commands still work just
 # more slowly during reconnection.
 #
+# A watchdog also probes the first local socket via mpv IPC every
+# HEALTHCHECK_INTERVAL seconds. Some failure modes (e.g. ssh half-open
+# after the remote sshd was offline mid-handshake) leave ssh alive but
+# the unix-socket forwards silently broken — ServerAlive can't see this
+# because the TCP layer is fine. On HEALTHCHECK_FAILS consecutive probe
+# failures the watchdog kills ssh so the reconnect loop can recover.
+#
 # Designed to run as a systemd user unit (see systemd/aar-mpv-tunnel.service).
 #
 # Env:
 #   AAR_MPV_TUNNEL_HOST          SSH alias of the phone (default: $CLAUDE_TTS_PHONE_HOST or p8ar)
 #   AAR_MPV_TUNNEL_BACKOFF       Seconds between reconnection attempts (default: 3)
+#   AAR_MPV_TUNNEL_HEALTHCHECK_INTERVAL  Seconds between mpv-IPC probes (default: 30; set to 0 to disable)
+#   AAR_MPV_TUNNEL_HEALTHCHECK_FAILS     Consecutive probe failures before forcing reconnect (default: 2)
+#   AAR_MPV_TUNNEL_HEALTHCHECK_TIMEOUT   Per-probe timeout in seconds (default: 3)
 #
 #   Per-channel overrides (set either to "off" to disable that channel):
 #     AAR_MPV_TUNNEL_LOCAL       tts local socket  (default: $XDG_STATE_HOME/agent-audio-relay/mpv-tts.sock)
@@ -37,6 +47,9 @@ set -u
 
 REMOTE_HOST="${AAR_MPV_TUNNEL_HOST:-${CLAUDE_TTS_PHONE_HOST:-p8ar}}"
 BACKOFF="${AAR_MPV_TUNNEL_BACKOFF:-3}"
+HEALTHCHECK_INTERVAL="${AAR_MPV_TUNNEL_HEALTHCHECK_INTERVAL:-30}"
+HEALTHCHECK_FAILS="${AAR_MPV_TUNNEL_HEALTHCHECK_FAILS:-2}"
+HEALTHCHECK_TIMEOUT="${AAR_MPV_TUNNEL_HEALTHCHECK_TIMEOUT:-3}"
 
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/agent-audio-relay"
 REMOTE_DIR="/data/data/com.termux/files/usr/tmp"
@@ -67,11 +80,47 @@ if [ ${#FORWARDS[@]} -eq 0 ]; then
     exit 0
 fi
 
+ssh_pid=
+wd_pid=
 cleanup() {
+    [ -n "$wd_pid" ] && kill "$wd_pid" 2>/dev/null
+    [ -n "$ssh_pid" ] && kill "$ssh_pid" 2>/dev/null
     for s in "${LOCAL_SOCKS[@]}"; do rm -f "$s"; done
     exit 0
 }
 trap cleanup INT TERM HUP
+
+# Probe a local mpv-IPC socket. Returns 0 if mpv answers within
+# HEALTHCHECK_TIMEOUT. Used to detect tunnels where ssh is alive but the
+# unix-socket forward is silently broken (no ServerAlive signal will fire
+# because the underlying TCP is fine).
+probe_socket() {
+    local sock="$1" out
+    out=$(printf '%s\n' '{"command":["get_property","pid"]}' \
+        | timeout "$HEALTHCHECK_TIMEOUT" socat - "UNIX-CONNECT:$sock" 2>/dev/null) || return 1
+    case "$out" in *'"error":"success"'*) return 0 ;; *) return 1 ;; esac
+}
+
+# Watchdog: probe the first forwarded socket every HEALTHCHECK_INTERVAL.
+# After HEALTHCHECK_FAILS consecutive failures, kill ssh so the outer
+# loop can reconnect. Set HEALTHCHECK_INTERVAL=0 to disable.
+watchdog() {
+    local target_pid="$1" probe_sock="$2" fails=0
+    sleep "$HEALTHCHECK_INTERVAL"  # grace period for bind + first connect
+    while kill -0 "$target_pid" 2>/dev/null; do
+        if probe_socket "$probe_sock"; then
+            fails=0
+        else
+            fails=$((fails + 1))
+            if [ "$fails" -ge "$HEALTHCHECK_FAILS" ]; then
+                echo "[aar-mpv-tunnel] tunnel wedged ($fails failed probes on $probe_sock); killing ssh pid=$target_pid" >&2
+                kill "$target_pid" 2>/dev/null
+                return
+            fi
+        fi
+        sleep "$HEALTHCHECK_INTERVAL"
+    done
+}
 
 echo "[aar-mpv-tunnel] forwarding ${#LOCAL_SOCKS[@]} socket(s) to $REMOTE_HOST:" >&2
 for s in "${LOCAL_SOCKS[@]}"; do echo "  $s" >&2; done
@@ -96,8 +145,22 @@ while true; do
         -o ExitOnForwardFailure=yes \
         -o StreamLocalBindUnlink=yes \
         -o ControlPath=none \
-        "$REMOTE_HOST" 2>&1
+        "$REMOTE_HOST" 2>&1 &
+    ssh_pid=$!
+
+    if [ "$HEALTHCHECK_INTERVAL" -gt 0 ]; then
+        watchdog "$ssh_pid" "${LOCAL_SOCKS[0]}" &
+        wd_pid=$!
+    fi
+
+    wait "$ssh_pid"
     rc=$?
+    ssh_pid=
+    if [ -n "$wd_pid" ]; then
+        kill "$wd_pid" 2>/dev/null
+        wait "$wd_pid" 2>/dev/null
+        wd_pid=
+    fi
     for s in "${LOCAL_SOCKS[@]}"; do rm -f "$s"; done
     echo "[aar-mpv-tunnel] ssh exited rc=$rc; reconnecting in ${BACKOFF}s" >&2
     sleep "$BACKOFF"
