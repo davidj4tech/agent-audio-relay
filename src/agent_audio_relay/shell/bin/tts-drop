@@ -148,7 +148,8 @@ esac
 # streaming render).
 final="${DROP_DIR}/$(make_stem "$TAG" "$KIND" "$SESSION").${STAGING_EXT}"
 staging=$(mktemp --suffix=".${STAGING_EXT}")
-trap 'rm -f "$staging"' EXIT
+txt_staging=$(mktemp --suffix=".txt")
+trap 'rm -f "$staging" "$txt_staging"' EXIT
 
 # Build the renderer command. Pass per-engine knobs through; the
 # renderer ignores ones that don't apply to the chosen engine.
@@ -177,6 +178,16 @@ if [ ! -s "$staging" ]; then
 fi
 
 mv "$staging" "$final"
+# Text sidecar: persist the exact text we sent to the engine so
+# downstream consumers (tts-popup highlight, future SRT, debugging)
+# can recover the spoken text from any clip. Named after the audio
+# stem with the audio extension stripped (`foo.mp3` → `foo.txt`) so a
+# future `<stem>.srt` slots in cleanly. Atomic mv keeps partial-write
+# bytes off-disk; written *before* the publish marker so any consumer
+# that resolves audio from a marker can rely on the sidecar already
+# being in place.
+printf '%s' "$text" > "$txt_staging"
+mv "$txt_staging" "${final%.*}.txt"
 # Publish via sidecar marker. Forwarder + watcher.py inotify on `*.play`
 # only, so files written to a watched dir without a marker (e.g.
 # tts-stream's concat archive) don't trigger playback. The marker is

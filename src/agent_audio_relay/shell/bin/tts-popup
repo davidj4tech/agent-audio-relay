@@ -21,6 +21,9 @@
 #   [ / ]   slower / faster (speed × 1/1.1 / × 1.1)
 #   < / >   previous / next clip in this session's archive
 #   Del/BS  reset speed to 1.0
+#   v       toggle sentence-level highlight in caller pane via copy-mode
+#           (requires TTS_POPUP_PANE='#{pane_id}' from the tmux binding;
+#           reads `tts-ctl spoken-text` sidecar text and tracks time-pos)
 #   i       show clip info (pos/dur/path) in tmux status line
 #   ?       show keymap in tmux status line
 #   q / Esc close
@@ -52,6 +55,8 @@ cat > "$HELP_FILE" <<'EOF'
    H / L    seek -30s / +30s
    - / =    volume -5 / +5
    m        toggle mute
+   v        highlight spoken sentence
+            in caller pane (copy-mode)
    ?        this help
    q / Esc  close popup
 
@@ -76,6 +81,16 @@ esac
 if [ -z "$SESSION" ] && [ -n "${TMUX:-}" ]; then
     SESSION=$(tmux display-message -p '#S' 2>/dev/null || true)
 fi
+
+# Caller pane id, for the `v` highlight feature. The tmux binding sets
+# TTS_POPUP_PANE='#{pane_id}' at popup-launch time so we can drive
+# copy-mode selection in the user's working pane (the popup itself
+# isn't a real tmux pane). Same defensive `#{` strip as SESSION above
+# in case a binding forgot the set-environment hop.
+HL_PANE="${TTS_POPUP_PANE:-}"
+case "$HL_PANE" in
+    *'#{'*) HL_PANE="" ;;
+esac
 
 # When the mpv-tts socket isn't local, every tts-ctl keypress otherwise
 # pays a fresh ssh handshake. If the user's ssh config already provides
@@ -511,6 +526,154 @@ draw() {
     fi
 }
 
+# --- Sentence highlight (v hotkey) -----------------------------------
+# Drives tmux copy-mode in $HL_PANE to background-color the sentence
+# currently being spoken. The text comes from `tts-ctl spoken-text`
+# (reads the `<stem>.txt` sidecar tts-drop writes), segmented into
+# `(char_start char_end text)` triples by `aar-spoken-text`. On each
+# tick we map mpv's time-pos onto the cumulative char range, find the
+# enclosing sentence, and re-issue the copy-mode selection if it
+# changed. tmux auto-scrolls to keep the cursor on-screen, which gives
+# us the auto-scroll-with-speech behavior for free.
+#
+# Caveats:
+#   - Sentence-level granularity only. Engine timestamps would be
+#     needed for word-level — out of scope for v1.
+#   - search-backward-text uses the sentence's first ~25 printable
+#     chars as the position anchor. If two sentences in the visible
+#     pane share that prefix, the most-recent (search-backward from
+#     history-bottom) wins, which is right for normal agent output.
+#   - If the agent text has scrolled out of pane history entirely,
+#     copy-mode just won't find it; the highlight silently no-ops for
+#     that sentence.
+HL_ENABLED=0
+HL_SENTENCES=()       # one entry per sentence: "<start>\t<end>\t<text>"
+HL_TOTAL_CHARS=0
+HL_LAST_IDX=-1        # last applied sentence index; -1 means "force apply next"
+
+# Wrapper for tmux send-keys -X to the caller pane. Swallows errors
+# (pane may have closed under us) so a single missing pane doesn't
+# crash the popup loop.
+_hl_pane_x() {
+    [ -n "$HL_PANE" ] || return 0
+    tmux send-keys -t "$HL_PANE" -X "$@" 2>/dev/null
+}
+
+_hl_search_prefix() {
+    # Trim newlines/tabs to spaces and leading whitespace, then take
+    # the first 25 chars. tmux's search-backward-text appears to match
+    # within visual lines only, so a multi-line sentence can't anchor
+    # on its full text — first-line prefix is the reliable anchor.
+    local s="$1"
+    s="${s//$'\n'/ }"
+    s="${s//$'\t'/ }"
+    s="${s#"${s%%[![:space:]]*}"}"
+    printf '%s' "${s:0:25}"
+}
+
+_hl_enable() {
+    if [ -z "$HL_PANE" ]; then
+        tmux display-message -d 4000 \
+            "tts: highlight needs TTS_POPUP_PANE — update tmux binding (set-environment TTS_POPUP_PANE '#{pane_id}')" \
+            2>/dev/null
+        return 1
+    fi
+    if ! command -v aar-spoken-text >/dev/null 2>&1; then
+        tmux display-message -d 3000 \
+            "tts: aar-spoken-text not on PATH — install/update agent-audio-relay" \
+            2>/dev/null
+        return 1
+    fi
+    local text
+    text=$(ctl spoken-text "$SESSION" 2>/dev/null)
+    if [ -z "$text" ]; then
+        tmux display-message -d 3000 \
+            "tts: no spoken-text sidecar for this clip (older producer?)" \
+            2>/dev/null
+        return 1
+    fi
+    HL_SENTENCES=()
+    while IFS= read -r line; do
+        [ -n "$line" ] && HL_SENTENCES+=("$line")
+    done < <(printf '%s' "$text" | aar-spoken-text)
+    if [ ${#HL_SENTENCES[@]} -eq 0 ]; then
+        tmux display-message -d 3000 \
+            "tts: spoken-text segmenter produced no sentences" 2>/dev/null
+        return 1
+    fi
+    HL_TOTAL_CHARS=${#text}
+    # Park the caller pane in copy-mode at history-bottom so the first
+    # search-backward starts from the freshest output.
+    tmux copy-mode -t "$HL_PANE" 2>/dev/null
+    _hl_pane_x clear-selection
+    _hl_pane_x history-bottom
+    HL_ENABLED=1
+    HL_LAST_IDX=-1
+    return 0
+}
+
+_hl_disable() {
+    [ "$HL_ENABLED" = "1" ] || return 0
+    _hl_pane_x cancel
+    HL_ENABLED=0
+    HL_LAST_IDX=-1
+}
+
+_hl_apply_for_pos() {
+    # No-op if highlight off or we don't have usable position data.
+    [ "$HL_ENABLED" = "1" ] || return
+    local pos="$1" dur="$2"
+    [ -z "$pos" ] || [ "$pos" = "null" ] && return
+    [ -z "$dur" ] || [ "$dur" = "null" ] && return
+    [ "$HL_TOTAL_CHARS" -gt 0 ] || return
+    # Time -> char position. We treat each character as taking equal
+    # time (poor man's prosody). Good enough for sentence granularity:
+    # short prosody jitter doesn't cross sentence boundaries.
+    local active_char
+    active_char=$(awk -v p="$pos" -v d="$dur" -v t="$HL_TOTAL_CHARS" \
+        'BEGIN{
+            if (d <= 0) { print 0; exit }
+            c = int((p / d) * t);
+            if (c < 0) c = 0;
+            if (c >= t) c = t - 1;
+            print c;
+        }')
+    # Linear scan — sentence count is ~dozens at most; binary search
+    # would be premature optimization here.
+    local idx=-1 i=0 entry s e txt
+    for entry in "${HL_SENTENCES[@]}"; do
+        IFS=$'\t' read -r s e txt <<< "$entry"
+        if [ "$active_char" -ge "$s" ] && [ "$active_char" -lt "$e" ]; then
+            idx=$i
+            break
+        fi
+        i=$((i + 1))
+    done
+    [ "$idx" -lt 0 ] && return
+    [ "$idx" = "$HL_LAST_IDX" ] && return
+    entry="${HL_SENTENCES[idx]}"
+    IFS=$'\t' read -r s e txt <<< "$entry"
+    local len=$((e - s))
+    local prefix
+    prefix=$(_hl_search_prefix "$txt")
+    [ -z "$prefix" ] && return
+    # Re-anchor each time: clear → bottom → search → select → extend.
+    # Doing it from history-bottom on every change keeps the highlight
+    # honest if the agent is still emitting output (search-backward
+    # from the latest line lands on the freshest occurrence). The
+    # cursor-right repeat extends the selection by `len` cells; tmux
+    # wraps cursor across visual newlines so multi-line sentences
+    # still get fully selected.
+    _hl_pane_x clear-selection
+    _hl_pane_x history-bottom
+    tmux send-keys -t "$HL_PANE" -X search-backward-text "$prefix" 2>/dev/null
+    _hl_pane_x begin-selection
+    if [ "$len" -gt 0 ]; then
+        tmux send-keys -t "$HL_PANE" -N "$len" -X cursor-right 2>/dev/null
+    fi
+    HL_LAST_IDX=$idx
+}
+
 REFRESH="${TTS_POPUP_REFRESH:-0.5}"   # how often the background fetcher polls mpv
 TICK="${TTS_POPUP_TICK:-0.15}"        # main-loop keypress timeout (UI responsiveness floor)
 AUTO_CLOSE_IDLE="${TTS_POPUP_AUTO_CLOSE:-10}"
@@ -581,6 +744,10 @@ _cleanup() {
     # Restore cursor visibility (we hid it at startup to avoid mid-frame
     # cursor blink showing as flicker).
     printf '\033[?25h'
+    # Exit copy-mode in the caller pane if highlight was on. Without
+    # this, dismissing the popup would leave the pane stuck in
+    # copy-mode with our last selection — confusing UX.
+    _hl_disable
     kill "$FETCH_PID" 2>/dev/null
     rm -f "$STATE_FILE" "$STATE_FILE.tmp" "$SOCK_FILE" "$SOCK_FILE.tmp" "$HELP_FILE"
     if [ -n "$_CTL_PATH" ] && [ -S "$_CTL_PATH" ]; then
@@ -598,6 +765,12 @@ done
 
 while true; do
     draw
+    # Drive sentence highlight from the cached time-pos/duration. Same
+    # data draw() reads, no extra IPC. STATE indices match the
+    # `mpv_batch_get` order in _refetch_state: 2=time-pos, 3=duration.
+    if [ "$HL_ENABLED" = "1" ]; then
+        _hl_apply_for_pos "${STATE[2]:-}" "${STATE[3]:-}"
+    fi
     # Auto-close bookkeeping (uses $IDLE set as a side-effect of draw).
     if [ "$IDLE" != "true" ] && [ -n "$IDLE" ]; then
         EVER_PLAYED=1
@@ -695,6 +868,9 @@ while true; do
             else
                 ctl prev-history >/dev/null 2>&1 & disown
             fi
+            # Different clip → cached sentences no longer match. Drop
+            # the highlight; user can press `v` again to re-anchor.
+            _hl_disable
             LOAD_PENDING_SINCE=$SECONDS; LAST_KEY="prev"
             ;;
         '>')
@@ -703,6 +879,7 @@ while true; do
             else
                 ctl next-history >/dev/null 2>&1 & disown
             fi
+            _hl_disable
             LOAD_PENDING_SINCE=$SECONDS; LAST_KEY="next"
             ;;
         $'\t')
@@ -710,9 +887,30 @@ while true; do
             # Pins until the picked channel goes idle.
             if _cycle_channel; then
                 _publish_sock
+                # Channel switch loads a different mpv (and music/voice
+                # clips have no `.txt` sidecar anyway) — drop any active
+                # highlight so we don't keep painting selections from
+                # the prior channel's text.
+                _hl_disable
                 LAST_KEY="ch:${CHANNEL}"
             else
                 LAST_KEY="ch:none"
+            fi
+            ;;
+        v)
+            # Sentence-level highlight in the caller pane via copy-mode.
+            # Toggle: first press fetches text + segments and enters
+            # copy-mode; second press exits it. Auto-disabled on
+            # channel cycle / prev / next since those load a different
+            # clip whose text we haven't fetched.
+            if [ "$HL_ENABLED" = "1" ]; then
+                _hl_disable; LAST_KEY="hl off"
+            else
+                if _hl_enable; then
+                    LAST_KEY="hl on"
+                else
+                    LAST_KEY="hl?"
+                fi
             fi
             ;;
         f)
@@ -760,7 +958,7 @@ while true; do
             # geometry constraints. -d 0 means "stay until cleared by next
             # status update" (which happens within status-interval).
             tmux display-message -d 9000 \
-                "tts: Spc/p=togl r=replay 0=start 1-9=seek% h/l=±5s H/L=±30s -/=vol m=mute [/]=speed </>=prev/next Tab=channel Del=spd1 i=info q=quit" \
+                "tts: Spc/p=togl r=replay 0=start 1-9=seek% h/l=±5s H/L=±30s -/=vol m=mute v=hl [/]=speed </>=prev/next Tab=channel Del=spd1 i=info q=quit" \
                 2>/dev/null
             ;;
         q|$'\e') exit 0 ;;

@@ -146,12 +146,22 @@ def process_queue(resolve: Callable[[], PlaybackBackend]) -> None:
     for queued in sorted(QUEUE_DIR.iterdir()):
         if not queued.is_file():
             continue
+        # Skip non-audio companions (e.g. `<stem>.txt` sidecars). They
+        # ride along in the queue dir so backends can archive them
+        # next to the audio, but they aren't playable themselves.
+        if queued.suffix.lstrip(".") not in AUDIO_EXTS:
+            continue
         backend = resolve()
         backend.wait_for_playback()
         pad_audio(queued)
         ok = backend.play(queued)
         log(f"{'PLAY:OK' if ok else 'PLAY:FAILED'} ({queued.name}) via {backend.name}")
         queued.unlink(missing_ok=True)
+        # Companion sidecar cleanup. The backend has already archived
+        # it (mpv backend's `_update_latest`), so the queue copy is
+        # done with.
+        sidecar = queued.with_suffix(".txt")
+        sidecar.unlink(missing_ok=True)
 
 
 def enqueue_file(filepath: str) -> bool:
@@ -175,9 +185,21 @@ def enqueue_file(filepath: str) -> bool:
 
     # Preserve original stem so backends can archive/replay by name.
     # Prepend ns to guarantee sort order even if two clips share a stem.
-    queue_entry = QUEUE_DIR / f"{time.time_ns()}__{src.name}"
+    ns = time.time_ns()
+    queue_entry = QUEUE_DIR / f"{ns}__{src.name}"
     try:
         shutil.copy2(str(src), str(queue_entry))
+        # Carry the text sidecar along if tts-drop wrote one. Same
+        # `<ns>__<stem>.txt` naming so the backend's archive step can
+        # find it next to the queued audio. Sidecar is best-effort —
+        # missing sidecar is fine (e.g. older producers, tts-stream).
+        sidecar_src = src.with_suffix(".txt")
+        if sidecar_src.exists():
+            sidecar_dst = QUEUE_DIR / f"{ns}__{sidecar_src.name}"
+            try:
+                shutil.copy2(str(sidecar_src), str(sidecar_dst))
+            except OSError:
+                pass
         log(f"Queued: {filepath} -> {queue_entry.name}")
         with open(STATE_FILE, "a") as f:
             f.write(filepath + "\n")

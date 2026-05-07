@@ -83,6 +83,20 @@ class MpvBackend(PlaybackBackend):
                 _shutil.copy2(str(path), str(archive))
         except OSError:
             return path
+        # Carry the text sidecar (`<stem>.txt`, written by tts-drop) into
+        # the archive next to the audio, named after the *archived* stem
+        # so consumers can resolve it from any `latest--…` audio symlink
+        # by stripping the audio extension. Best-effort: a missing
+        # sidecar (legacy producers, tts-stream) is fine.
+        sidecar_src = path.with_suffix(".txt")
+        if sidecar_src.exists():
+            sidecar_dst = archive.with_suffix(".txt")
+            try:
+                if sidecar_dst.resolve() != sidecar_src.resolve():
+                    import shutil as _shutil
+                    _shutil.copy2(str(sidecar_src), str(sidecar_dst))
+            except OSError:
+                pass
         # Build pointer set: global, per-session, host-namespaced,
         # per-session__agent. Mirrors the layout ssh_termux writes so
         # `tts-ctl replay_target` can resolve session-scoped audio

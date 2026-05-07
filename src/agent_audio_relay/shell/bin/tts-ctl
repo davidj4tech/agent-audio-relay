@@ -332,6 +332,21 @@ case "${1:-}" in
         fi
         # else: no clip for this session — silent no-op, popup surfaces it.
         ;;
+    loadfile)
+        # Generic loadfile passthrough — used by tts-pick to play a
+        # URL/path the caller chose. Unpauses afterward to match the
+        # behaviour of every other "play this" subcommand here.
+        [ -z "${2:-}" ] && { echo "Usage: tts-ctl [--socket PATH] loadfile URL_OR_PATH" >&2; exit 1; }
+        mpv_cmd "{\"command\":[\"loadfile\",$(printf '%s' "$2" | jq -Rsc 'rtrimstr("\n")'),\"replace\"]}" >/dev/null
+        mpv_cmd '{"command":["set_property","pause",false]}' >/dev/null
+        ;;
+    set-cursor)
+        # Set the per-channel history cursor (used by tts-pick after
+        # picking a non-newest entry, so subsequent prev/next walks
+        # continue from the picked spot).
+        [ -z "${2:-}" ] && { echo "Usage: tts-ctl [--socket PATH] set-cursor INDEX" >&2; exit 1; }
+        mpv_cmd "{\"command\":[\"set_property\",\"user-data/aar/history-cursor\",${2}]}" >/dev/null
+        ;;
     playlist-prev) mpv_cmd '{"command":["playlist-prev"]}' >/dev/null ;;
     playlist-next) mpv_cmd '{"command":["playlist-next"]}' >/dev/null ;;
     prev-history|next-history)
@@ -515,8 +530,70 @@ case "${1:-}" in
         [ $# -gt 0 ] || { echo "tts-ctl get: needs at least one property" >&2; exit 2; }
         mpv_batch_get "$@"
         ;;
+    spoken-text)
+        # Print the post-markdown-strip text that produced the currently
+        # loaded (or session-pinned) audio clip, by reading the `<stem>.txt`
+        # sidecar tts-drop writes alongside each mp3. Used by tts-popup
+        # to drive sentence-level highlight + auto-scroll in the caller
+        # tmux pane via copy-mode.
+        #
+        # Resolution order:
+        #   1. If a session arg is given, use replay_target() to pick the
+        #      most-specific `latest--…` archive symlink, then deref to
+        #      the actual archived `.mp3` and swap to `.txt`.
+        #   2. Otherwise, ask mpv for its current `path` property and do
+        #      the same swap. If mpv reports a symlink, we deref so the
+        #      sidecar lookup hits the real archived file (no `.txt`
+        #      symlinks are written — only the audio side is symlinked).
+        #
+        # Exit nonzero with no output if no sidecar exists (clip from a
+        # legacy producer, or tts-stream's concat archive). Caller should
+        # treat that as "highlight not available for this clip" and skip
+        # gracefully.
+        session="${2:-}"
+        audio=""
+        if [ -n "$session" ]; then
+            audio=$(replay_target "$session") || true
+        fi
+        if [ -z "$audio" ]; then
+            audio=$(mpv_get path)
+        fi
+        if [ -z "$audio" ] || [ "$audio" = "null" ]; then
+            exit 1
+        fi
+        # Sidecar path: strip the audio extension, append `.txt`. The
+        # sidecar lives in the same directory as the archived audio
+        # (mpv backend's `_update_latest`).
+        if [ -d "$ARCHIVE_DIR" ]; then
+            # Local: deref any latest-* symlink to the real archive file
+            # so the sidecar lookup uses the underlying stem. The mpv
+            # backend writes sidecars next to the *archived* audio, not
+            # next to the symlinks.
+            real=$(readlink -f "$audio" 2>/dev/null || printf '%s' "$audio")
+            txt="${real%.*}.txt"
+            [ -r "$txt" ] || exit 1
+            cat "$txt"
+        else
+            # Remote: do the deref+swap+cat in one ssh hop. Quoting:
+            # the audio path may include `:` and shell metacharacters,
+            # so we %q the whole script body. Bash on the remote keeps
+            # the `${var%.*}` ext-strip portable across Termux's busybox
+            # readlink (which lacks GNU `readlink -f`'s `-q` flag but
+            # still supports `-f`).
+            remote_script="
+                set -u
+                a=\$(readlink -f $(printf '%q' "$audio") 2>/dev/null || printf '%s' $(printf '%q' "$audio"))
+                t=\${a%.*}.txt
+                [ -r \"\$t\" ] || exit 1
+                cat \"\$t\"
+            "
+            # shellcheck disable=SC2029,SC2086
+            ssh ${TTS_SSH_DEFAULTS} ${CLAUDE_TTS_SSH_OPTS:-} "$PHONE_HOST" \
+                "bash -c $(printf '%q' "$remote_script")" 2>/dev/null
+        fi
+        ;;
     *)
-        echo "Usage: tts-ctl [--socket PATH] pause|resume|toggle|replay [session]|prev|next [session]|playlist-prev|playlist-next|seek SECS|seek-percent PCT|start|volume DELTA|mute|slower|faster|speed N|stop|stop-all|status|nowplaying|get PROP..." >&2
+        echo "Usage: tts-ctl [--socket PATH] pause|resume|toggle|replay [session]|prev|next [session]|playlist-prev|playlist-next|seek SECS|seek-percent PCT|start|volume DELTA|mute|slower|faster|speed N|stop|stop-all|status|nowplaying|spoken-text [session]|get PROP..." >&2
         exit 1
         ;;
 esac

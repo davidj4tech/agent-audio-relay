@@ -56,6 +56,14 @@ while IFS= read -r marker; do
   [ -f "$audio" ] || { rm -f "$marker"; continue; }
   src_dir=$(basename "$(dirname "$audio")")
   remote_dir="$REMOTE_BASE/$src_dir"
+  # Optional text sidecar (`<stem>.txt`) — written by tts-drop so
+  # consumers can highlight the spoken text in tmux. Ship it ahead of
+  # audio + marker so it's already on the remote when the marker's
+  # CLOSE_WRITE fires; the sidecar itself doesn't trigger playback.
+  txt="${audio%.*}.txt"
+  sources=()
+  [ -f "$txt" ] && sources+=("$txt")
+  sources+=("$audio" "$marker")
   # scp, not rsync: rsync's tmp-file+rename pattern doesn't fire
   # CLOSE_WRITE/MOVED_TO on Termux/Android, so the remote relay's
   # inotifywait never sees rsync-delivered files. Send audio *and*
@@ -64,8 +72,9 @@ while IFS= read -r marker; do
   # place. Termux's `touch` uses utimensat() and silently fails to
   # fire CLOSE_WRITE on file creation, so ssh-touch doesn't work as
   # the publish signal; an actual write (scp) does.
-  if scp -q "$audio" "$marker" "$REMOTE:$remote_dir/" 2>/dev/null; then
+  if scp -q "${sources[@]}" "$REMOTE:$remote_dir/" 2>/dev/null; then
     rm -f "$audio" "$marker"
+    [ -f "$txt" ] && rm -f "$txt"
     echo "[forwarder] sent $audio -> $REMOTE:$remote_dir/" >&2
   else
     echo "[forwarder] FAILED $audio (will retry on next event)" >&2

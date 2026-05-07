@@ -52,14 +52,20 @@ tmux bind "$PREFIX_KEY" switch-client -T tts
 #   r      → replay the current session's latest clip (one-shot)
 # `display-popup` does not format-expand its shell-command argument,
 # so we route the session via tmux's set-environment (which does).
+# TTS_POPUP_PANE pins the popup's `v` hotkey (sentence highlight via
+# copy-mode) to the pane that invoked the popup. Without it, the popup
+# can't drive copy-mode in the right pane and the highlight feature is
+# silently disabled.
 tmux bind -T tts t \
     set-environment -g TTS_POPUP_SESSION '#{session_name}' \\\; \
+    set-environment -g TTS_POPUP_PANE '#{pane_id}' \\\; \
     display-popup -E -w "$POPUP_W" -h "$POPUP_H" -x "$POPUP_X" -y "$POPUP_Y" \
     'tts-popup'
 
 # No-prefix shortcut to the same popup.
 tmux bind -n "$POPUP_KEY" \
     set-environment -g TTS_POPUP_SESSION '#{session_name}' \\\; \
+    set-environment -g TTS_POPUP_PANE '#{pane_id}' \\\; \
     display-popup -E -w "$POPUP_W" -h "$POPUP_H" -x "$POPUP_X" -y "$POPUP_Y" \
     'tts-popup'
 

@@ -83,12 +83,21 @@ def _strip_code_blocks(text: str) -> str:
 def _is_real_sentence_end(buf: str, pos: int) -> bool:
     """``buf[pos]`` is `.!?` — return whether it actually ends a sentence
     (i.e. isn't part of an abbreviation like ``Dr.``).
+
+    Multi-dot abbreviations (``p.m.``, ``e.g.``, ``U.S.``) need the walk-
+    back to traverse interior ``.`` so the lookup string matches the
+    full token. Without this, the walk stops at the first interior dot
+    and we look up only ``m.`` / ``g.`` / ``S.`` — all absent from
+    ``_ABBREV`` — and incorrectly treat the trailing ``.`` as a sentence
+    boundary, splitting "...at 3 p.m. tomorrow." into two sentences.
     """
     if buf[pos] != ".":
         return True
-    # Walk backward to find the start of the current word.
+    # Walk backward to find the start of the current word, treating
+    # interior `.` as part of the token so e.g. "p.m." is recovered
+    # whole. Stops at any whitespace / non-alpha-non-dot char.
     start = pos
-    while start > 0 and buf[start - 1].isalpha():
+    while start > 0 and (buf[start - 1].isalpha() or buf[start - 1] == "."):
         start -= 1
     word = buf[start : pos + 1].lower()
     return word not in _ABBREV
