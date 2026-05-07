@@ -715,6 +715,16 @@ while true; do
                 LAST_KEY="ch:none"
             fi
             ;;
+        f)
+            # Open the fzf picker for the current channel. The current
+            # popup is too small (22×3) for fzf, and nesting
+            # display-popup from inside the still-active popup is
+            # rejected by tmux. Use `run-shell -b` to spawn a detached
+            # process that waits for our popup to close, then opens a
+            # fresh larger popup running the picker.
+            tmux run-shell -b "sh -c 'sleep 0.15; tmux display-popup -E -w 90% -h 70% \"TTS_POPUP_SESSION=\\\"$SESSION\\\" tts-pick $CHANNEL\"'"
+            exit 0
+            ;;
         DELETE|$'\b'|$'\x7f') ctl speed 1 >/dev/null 2>&1 & disown; LAST_KEY="speed=1" ;;
         # mpv/VLC convention: digits 1-9 jump to N×10% of the clip.
         # 0 stays as seek-to-start (which is also 0% — consistent).

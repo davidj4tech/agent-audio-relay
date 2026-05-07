@@ -1,0 +1,106 @@
+#!/bin/bash
+# tts-pick — fzf picker for channel history / tts archive.
+#
+# Random-access companion to the popup's `<` / `>` (which step one-at-a-
+# time through the same data). Dispatches by channel:
+#   music / voice — read mpv's user-data/aar/history, fzf the URLs
+#                   (newest first), loadfile the picked one and set
+#                   the cursor so subsequent prev/next walks continue
+#                   from there.
+#   tts           — ssh the phone, list the session's archive by
+#                   mtime, fzf the filenames, loadfile the picked one.
+#
+# Channel auto-detected from non-idle sockets (priority tts > voice >
+# music — same as the popup) when not given. Override with arg 1.
+#
+# Suggested tmux binding (in ~/.tmux.conf.local):
+#   bind -T tts f display-popup -E -w 90 -h 22 'tts-pick'
+#
+# Env:
+#   TTS_CTL    Path to tts-ctl (default: tts-ctl from PATH)
+#   AAR_PHONE  ssh alias for the tts archive host (default: p8ar)
+
+set -u
+TTS_CTL="${TTS_CTL:-tts-ctl}"
+PHONE_HOST="${AAR_PHONE:-p8ar}"
+SESSION="${TTS_POPUP_SESSION:-}"
+case "$SESSION" in *'#{'*) SESSION="" ;; esac
+[ -z "$SESSION" ] && [ -n "${TMUX:-}" ] && SESSION=$(tmux display-message -p '#S' 2>/dev/null || true)
+
+_state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/agent-audio-relay"
+_tts_sock="$_state_dir/mpv-tts.sock"
+_voice_sock="$_state_dir/mpv-voice.sock"
+_music_sock="$_state_dir/mpv-music.sock"
+
+_probe_idle() {
+    local sock="$1" r
+    [ -S "$sock" ] || { printf 'unknown'; return; }
+    r=$(printf '%s\n' '{"command":["get_property","idle-active"]}' \
+        | socat -T 1 - "UNIX-CONNECT:$sock" 2>/dev/null \
+        | jq -r 'select(.error=="success")|.data' 2>/dev/null | head -n1)
+    case "$r" in true) printf 'idle' ;; false) printf 'active' ;; *) printf 'unknown' ;; esac
+}
+
+CHANNEL="${1:-auto}"
+case "$CHANNEL" in
+    auto)
+        if   [ "$(_probe_idle "$_tts_sock")"   = "active" ]; then CHANNEL="tts";   _SOCK="$_tts_sock"
+        elif [ "$(_probe_idle "$_voice_sock")" = "active" ]; then CHANNEL="voice"; _SOCK="$_voice_sock"
+        elif [ "$(_probe_idle "$_music_sock")" = "active" ]; then CHANNEL="music"; _SOCK="$_music_sock"
+        elif [ -S "$_music_sock" ]; then CHANNEL="music"; _SOCK="$_music_sock"
+        elif [ -S "$_voice_sock" ]; then CHANNEL="voice"; _SOCK="$_voice_sock"
+        else CHANNEL="tts"; _SOCK="$_tts_sock"; fi
+        ;;
+    tts)   _SOCK="$_tts_sock" ;;
+    voice) _SOCK="$_voice_sock" ;;
+    music) _SOCK="$_music_sock" ;;
+    *) echo "usage: tts-pick [auto|tts|voice|music]" >&2; exit 1 ;;
+esac
+
+case "$CHANNEL" in
+    music|voice)
+        # Read history (compact JSON; mpv_get already passes -c).
+        HIST=$("$TTS_CTL" --socket "$_SOCK" get user-data/aar/history)
+        if [ -z "$HIST" ] || [ "$HIST" = "null" ]; then
+            echo "(empty $CHANNEL history — play something via mpv-mcp first)"
+            exit 1
+        fi
+        # Show indexed list, newest first. Format: "<idx>\t<url>" — the
+        # leading index is what we use to set the cursor on selection
+        # (it's the original position in the history array, NOT the
+        # display order, so prev/next walks from the right spot after).
+        SEL=$(printf '%s' "$HIST" \
+            | jq -r 'to_entries | reverse | .[] | "\(.key)\t\(.value.url)"' \
+            | fzf --prompt="$CHANNEL > " --with-nth=2.. --delimiter='\t' \
+                  --no-multi --height=100% --reverse)
+        [ -z "$SEL" ] && exit 0
+        IDX="${SEL%%	*}"
+        URL="${SEL#*	}"
+        "$TTS_CTL" --socket "$_SOCK" loadfile "$URL"
+        "$TTS_CTL" --socket "$_SOCK" set-cursor "$IDX"
+        ;;
+    tts)
+        if [ -z "$SESSION" ]; then
+            echo "(no tmux session — set TTS_POPUP_SESSION or run inside tmux)"
+            exit 1
+        fi
+        # Slug session the same way denote-stem.sh does (clamp to denote-safe chars).
+        SSLUG=$(printf '%s' "$SESSION" | tr -c 'A-Za-z0-9-' '-' | sed 's/-\+/-/g; s/^-//; s/-$//')
+        FILES=$(ssh -o BatchMode=yes "$PHONE_HOST" \
+            "bash -c 'set +o nullglob; ls -t \$HOME/.local/state/agent-audio-relay/*--${SSLUG}__*.{wav,mp3,opus,ogg} 2>/dev/null'")
+        if [ -z "$FILES" ]; then
+            echo "(no tts archive for session: $SESSION)"
+            exit 1
+        fi
+        # Show basename in fzf, full path stored. Tab-separated so we
+        # can recover the path on selection.
+        SEL=$(printf '%s\n' "$FILES" \
+            | awk -F/ 'NF{print $0 "\t" $NF}' \
+            | awk -F'\t' '{print $1 "\t" $2}' \
+            | fzf --prompt="tts:$SESSION > " --with-nth=2 --delimiter='\t' \
+                  --no-multi --height=100% --reverse)
+        [ -z "$SEL" ] && exit 0
+        FILE="${SEL%%	*}"
+        "$TTS_CTL" --socket "$_SOCK" loadfile "$FILE"
+        ;;
+esac
