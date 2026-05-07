@@ -698,6 +698,31 @@ on each host so `tts-ctl`, `tts-popup`, and `tts-status-line` are on
 use TPM, source `examples/tmux.conf.snippet` from your tmux config
 instead.
 
+### Without TPM (or with a `run`-based config loader)
+
+TPM discovers `set -g @plugin '…'` lines by scanning files reachable
+via `source-file` from your top-level `~/.tmux.conf`. If your config
+loader uses `run` instead — gpakosz/oh-my-tmux's `.tmux.conf.local`
+is the common case — TPM never sees the @plugin line in that file
+and the plugin silently doesn't install. Symptom: `prefix T t` does
+nothing because no binding was registered.
+
+The package ships a `tts-tmux-install` entrypoint that bypasses TPM
+and directly registers the same bindings + status-right integration.
+Add **one line** to your tmux config (your `.tmux.conf.local` if you
+use oh-my-tmux):
+
+```tmux
+run-shell "tts-tmux-install"
+```
+
+The same `@tts-*` overrides documented above (prefix-key, popup-key,
+toggle-key, popup geometry, status-line, status-interval) work with
+this path too — `tts-tmux-install` reads them via `tmux show -gqv`.
+
+You still need `pip install --user agent-audio-relay` (or pipx) so
+`tts-tmux-install`, `tts-ctl`, `tts-popup`, etc. are on `$PATH`.
+
 ### Status-line integration
 
 For an always-on display that doesn't take a popup, add `tts-status-line`

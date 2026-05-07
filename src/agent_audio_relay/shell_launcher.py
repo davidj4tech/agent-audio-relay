@@ -41,6 +41,33 @@ def codex_hook() -> None:         _exec("hooks/codex-tts-hook.sh")
 def ha_bridge() -> None:          _exec("hooks/ha-tts-bridge.sh")
 
 
+def tts_tmux_install() -> None:
+    """Exec the packaged tts.tmux to register the popup/status bindings.
+
+    Designed to be sourced from a tmux config via `run-shell`, e.g.
+
+        run-shell "tts-tmux-install"
+
+    This is the non-TPM install path. It works for users whose config
+    loader (gpakosz/oh-my-tmux's `run`-based .tmux.conf.local; any
+    custom split-file setup) doesn't expose `set -g @plugin` lines to
+    TPM's plugin-discovery scanner. The TPM path
+    (`set -g @plugin 'davidj4tech/agent-audio-relay'`) still works for
+    users whose config TPM can scan.
+
+    The script lives at `agent_audio_relay/tts.tmux` inside the wheel
+    via `[tool.hatch.build.targets.wheel.force-include]` (pyproject.toml).
+    """
+    script = Path(__file__).resolve().parent / "tts.tmux"
+    if not script.exists():
+        sys.stderr.write(
+            f"agent-audio-relay: missing packaged tts.tmux: {script}\n"
+            "Try `pip install --force-reinstall agent-audio-relay`.\n"
+        )
+        sys.exit(127)
+    os.execv("/bin/bash", ["/bin/bash", str(script), *sys.argv[1:]])
+
+
 def hooks_dir() -> None:
     """Print the install path of the hooks directory.
 

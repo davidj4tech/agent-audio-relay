@@ -38,6 +38,7 @@ aar-spoken-text                = "agent_audio_relay.spoken_text:main"
 tts-ctl                        = "agent_audio_relay.shell_launcher:tts_ctl"
 tts-popup                      = "agent_audio_relay.shell_launcher:tts_popup"
 tts-pick                       = "agent_audio_relay.shell_launcher:tts_pick"
+tts-tmux-install               = "agent_audio_relay.shell_launcher:tts_tmux_install"
 tts-status-line                = "agent_audio_relay.shell_launcher:tts_status_line"
 aar-mpv-tunnel                 = "agent_audio_relay.shell_launcher:mpv_tunnel"
 claude-code-tts-hook           = "agent_audio_relay.shell_launcher:claude_code_hook"
@@ -50,3 +51,10 @@ ha-tts-bridge                  = "agent_audio_relay.shell_launcher:ha_bridge"
 # bash scripts under shell/. The shell_launcher.py entries in
 # [project.scripts] resolve those scripts at runtime via __file__.
 packages = ["src/agent_audio_relay"]
+
+# tts.tmux at the repo root is the TPM plugin entry point. force-include
+# also drops it inside the wheel so `tts-tmux-install` (the non-TPM path
+# for users with `run`-based config loaders like gpakosz/oh-my-tmux) can
+# locate and exec it without needing the git checkout.
+[tool.hatch.build.targets.wheel.force-include]
+"tts.tmux" = "agent_audio_relay/tts.tmux"
