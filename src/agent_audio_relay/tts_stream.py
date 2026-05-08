@@ -80,6 +80,32 @@ def _strip_code_blocks(text: str) -> str:
     return _CODE_FENCE_RE.sub("", text)
 
 
+def _strip_id3v2(data: bytes) -> bytes:
+    """Strip a leading ID3v2 tag from ``data`` if present, else return as-is.
+
+    ID3v2 layout: 10-byte header (`"ID3"` magic, version, flags, 28-bit
+    synchsafe size) followed by ``size`` bytes of tag content. If the
+    "footer present" flag (bit 4 of the flags byte) is set, an
+    additional 10-byte footer follows the tag content — rare in
+    practice but cheap to handle.
+
+    Used by tts-stream to strip per-segment headers when concatenating
+    edge-tts/openai-tts MP3s into a single byte stream, so mpv's MP3
+    demuxer doesn't resync at every segment boundary.
+    """
+    if len(data) < 10 or data[:3] != b"ID3":
+        return data
+    flags = data[5]
+    # Synchsafe integer: 4 bytes, 7 bits each, top bit always 0.
+    size = (data[6] << 21) | (data[7] << 14) | (data[8] << 7) | data[9]
+    tag_end = 10 + size + (10 if flags & 0x10 else 0)
+    if tag_end > len(data):
+        # Malformed / truncated — leave untouched rather than risk
+        # cutting frames off.
+        return data
+    return data[tag_end:]
+
+
 def _is_real_sentence_end(buf: str, pos: int) -> bool:
     """``buf[pos]`` is `.!?` — return whether it actually ends a sentence
     (i.e. isn't part of an abbreviation like ``Dr.``).
@@ -310,35 +336,33 @@ class _StreamHandler(http.server.BaseHTTPRequestHandler):
             return 0
 
     def do_HEAD(self) -> None:
-        # ffmpeg's HTTP demuxer sometimes probes with HEAD before
-        # GETting the bytes. While the stream is still growing we hide
-        # range support — see do_GET for why.
-        seekable = self.stream_buffer.complete
+        # Never advertise Accept-Ranges — see do_GET. Always Icecast-style.
         self.send_response(200)
         self.send_header("Content-Type", "audio/mpeg")
-        if seekable:
-            self.send_header("Accept-Ranges", "bytes")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "close")
         self.end_headers()
 
     def do_GET(self) -> None:
-        start = self._parse_range()
-        # Only honour Range / advertise seekability once the buffer is
-        # finalized. While we're still streaming, advertising
-        # Accept-Ranges makes mpv treat the URL as a seekable file and
-        # seek-back-to-zero after probing the MP3 header — which
-        # causes the opening bytes (the first segment) to be decoded
-        # and played twice. Behave like an Icecast endpoint until
-        # complete.
-        seekable = self.stream_buffer.complete
-        is_range = seekable and self.headers.get("Range", "").startswith("bytes=")
-        if not seekable:
-            start = 0
+        # We never advertise Accept-Ranges, regardless of whether the
+        # buffer is complete. The earlier "advertise once complete=True"
+        # design had a race: complete could flip between mpv's HEAD probe
+        # and its GET (or between two GETs for a short stream), making
+        # mpv treat the URL as seekable mid-flight and seek-back-to-zero
+        # after parsing the MP3 header. The result was the opening
+        # segment(s) being decoded and played twice — exactly the
+        # "tts segments are repeating" symptom users reported on long
+        # replies routed via tts-stream.
+        #
+        # We still parse Range — if a client explicitly asks for a byte
+        # range we honour it (popup seek-back stays functional for
+        # finalized streams) — but we don't tell mpv up front that
+        # ranges are available, which is the trigger for its
+        # speculative seek-back-to-zero probe.
+        is_range = self.headers.get("Range", "").startswith("bytes=")
+        start = self._parse_range() if is_range else 0
         self.send_response(206 if is_range else 200)
         self.send_header("Content-Type", "audio/mpeg")
-        if seekable:
-            self.send_header("Accept-Ranges", "bytes")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "close")
         if is_range:
@@ -508,8 +532,17 @@ class StreamRunner:
         # mpv (already connected via loadfile at run start) reads
         # forward-only; the buffer also retains earlier bytes so any
         # seek-back the user does in the popup can be served from
-        # memory. Concatenated MP3 frames produce a valid stream;
-        # mpv handles framing.
+        # memory.
+        #
+        # Strip leading ID3v2 tags from segments past seq 0. edge-tts
+        # (and openai-tts) prepend a fresh ID3v2 header to every MP3
+        # they emit. Naively concatenating produces a stream like
+        # `[ID3+frames₀][ID3+frames₁]…`; mpv's MP3 demuxer hits each
+        # mid-stream ID3, flushes its parser and resyncs on the next
+        # frame header — audibly a brief stutter at every segment
+        # boundary. Keeping seg 0's tag (so mpv gets codec params on
+        # the initial probe) and stripping the rest concatenates into
+        # a clean MP3 frame stream.
         try:
             data = path.read_bytes()
         except OSError as e:
@@ -518,6 +551,8 @@ class StreamRunner:
         if self._stream_buffer is None:
             self.errors.append(f"seg {seq}: stream server not running")
             return
+        if seq > 0:
+            data = _strip_id3v2(data)
         self._stream_buffer.append(data)
         if seq == 0:
             self.first_dispatch_done.set()
