@@ -44,6 +44,7 @@ aar-mpv-tunnel                 = "agent_audio_relay.shell_launcher:mpv_tunnel"
 aar-sink-stream                = "agent_audio_relay.shell_launcher:sink_stream"
 aar-sink-connect               = "agent_audio_relay.shell_launcher:sink_connect"
 aar-sink-run                   = "agent_audio_relay.shell_launcher:sink_run"
+aar-setup                      = "agent_audio_relay.setup_cli:main"
 claude-code-tts-hook           = "agent_audio_relay.shell_launcher:claude_code_hook"
 opencode-tts-hook              = "agent_audio_relay.shell_launcher:opencode_hook"
 codex-tts-hook                 = "agent_audio_relay.shell_launcher:codex_hook"
@@ -61,3 +62,10 @@ packages = ["src/agent_audio_relay"]
 # locate and exec it without needing the git checkout.
 [tool.hatch.build.targets.wheel.force-include]
 "tts.tmux" = "agent_audio_relay/tts.tmux"
+# Ship the systemd unit files inside the wheel so `aar-setup` can find
+# them via `Path(__file__).parent / "systemd/"` after `pip install`.
+"systemd/aar-mpv-tunnel.service"               = "agent_audio_relay/systemd/aar-mpv-tunnel.service"
+"systemd/aar-sink-stream.service"              = "agent_audio_relay/systemd/aar-sink-stream.service"
+"systemd/agent-audio-relay-forwarder.service"  = "agent_audio_relay/systemd/agent-audio-relay-forwarder.service"
+"systemd/agent-audio-relay.service"            = "agent_audio_relay/systemd/agent-audio-relay.service"
+"systemd/opencode-tts-watcher.service"         = "agent_audio_relay/systemd/opencode-tts-watcher.service"
