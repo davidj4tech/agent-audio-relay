@@ -64,6 +64,22 @@ VOICE_REMOTE="${AAR_MPV_TUNNEL_VOICE_REMOTE:-$REMOTE_DIR/mpv-voice.sock}"
 
 mkdir -p "$STATE_DIR"
 
+# Single-instance lock. Two concurrent tunnels would fight over the same
+# local socket paths via StreamLocalBindUnlink=yes — each respawn evicts
+# the other's bind, producing a kill-loop where TTS plays restart every
+# few seconds. This happened in practice when an interactive
+# `aar-mpv-tunnel --help | head -30` (the script doesn't recognise --help
+# and starts its main loop) was orphaned by SIGPIPE and ran for 19h
+# alongside the systemd-managed unit. Hold an exclusive flock on a
+# stable lockfile for the lifetime of the script; second instance exits
+# instead of competing.
+LOCKFILE="$STATE_DIR/aar-mpv-tunnel.lock"
+exec 9>"$LOCKFILE"
+if ! flock -n 9; then
+    echo "[aar-mpv-tunnel] another instance is already running (lock $LOCKFILE held); exiting" >&2
+    exit 0
+fi
+
 LOCAL_SOCKS=()
 FORWARDS=()
 for pair in "$TTS_LOCAL:$TTS_REMOTE" "$MUSIC_LOCAL:$MUSIC_REMOTE" "$VOICE_LOCAL:$VOICE_REMOTE"; do
@@ -95,9 +111,15 @@ trap cleanup INT TERM HUP
 # unix-socket forward is silently broken (no ServerAlive signal will fire
 # because the underlying TCP is fine).
 probe_socket() {
+    # Keep stdin open briefly after the command so the mpv reply has
+    # time to make the full SSH round-trip back before socat half-closes.
+    # Without the trailing sleep, on a slow Tailscale link (relay path,
+    # phone in doze, etc.) socat closes the connection before the reply
+    # arrives — we see an empty `out`, count it as a probe failure, and
+    # the watchdog kills a perfectly healthy tunnel every ~64s.
     local sock="$1" out
-    out=$(printf '%s\n' '{"command":["get_property","pid"]}' \
-        | timeout "$HEALTHCHECK_TIMEOUT" socat - "UNIX-CONNECT:$sock" 2>/dev/null) || return 1
+    out=$( (printf '%s\n' '{"command":["get_property","pid"]}'; sleep 0.3) \
+        | timeout "$HEALTHCHECK_TIMEOUT" socat -t 2 - "UNIX-CONNECT:$sock" 2>/dev/null) || return 1
     case "$out" in *'"error":"success"'*) return 0 ;; *) return 1 ;; esac
 }
 
