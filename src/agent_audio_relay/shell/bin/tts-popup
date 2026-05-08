@@ -116,16 +116,30 @@ _phone_tts_sock="/data/data/com.termux/files/usr/tmp/mpv-tts.sock"
 
 _probe_idle() {
     # Returns "active", "idle", or "unknown" for the given socket.
+    # Keep stdin open for ~0.3s after sending the command so the
+    # response has time to make a full RTT through the SSH tunnel
+    # before socat half-closes — `socat -T 1` alone closes too fast
+    # on slow links and we see empty replies (popup defaulted to
+    # "(idle)" even when channels were active).
     local sock="$1" r
     [ -S "$sock" ] || { printf 'unknown'; return; }
-    r=$(printf '%s\n' '{"command":["get_property","idle-active"]}' \
-        | socat -T 1 - "UNIX-CONNECT:$sock" 2>/dev/null \
+    r=$( (printf '%s\n' '{"command":["get_property","idle-active"]}'; sleep 0.3) \
+        | socat -t 2 - "UNIX-CONNECT:$sock" 2>/dev/null \
         | jq -r 'select(.error=="success")|.data' 2>/dev/null | head -n1)
     case "$r" in
         true)  printf 'idle' ;;
         false) printf 'active' ;;
         *)     printf 'unknown' ;;
     esac
+}
+
+_probe_has_path() {
+    local sock="$1" r
+    [ -S "$sock" ] || return 1
+    r=$( (printf '%s\n' '{"command":["get_property","path"]}'; sleep 0.3) \
+        | socat -t 2 - "UNIX-CONNECT:$sock" 2>/dev/null \
+        | jq -r 'select(.error=="success")|.data' 2>/dev/null | head -n1)
+    [ -n "$r" ] && [ "$r" != "null" ]
 }
 
 CHANNEL="tts"
@@ -189,6 +203,15 @@ _select_channel() {
         elif [ "$(_probe_idle "$_voice_sock")" = "active" ]; then
             _SOCK="$_voice_sock"; CHANNEL="voice"
         elif [ "$(_probe_idle "$_music_sock")" = "active" ]; then
+            _SOCK="$_music_sock"; CHANNEL="music"
+        # Nothing actively playing — prefer a channel that has a clip
+        # loaded (paused/eof) so the popup opens on something replayable
+        # instead of a bare "(idle)". Same tts > voice > music priority.
+        elif _probe_has_path "$_tts_sock"; then
+            _SOCK="$_tts_sock"; CHANNEL="tts"
+        elif _probe_has_path "$_voice_sock"; then
+            _SOCK="$_voice_sock"; CHANNEL="voice"
+        elif _probe_has_path "$_music_sock"; then
             _SOCK="$_music_sock"; CHANNEL="music"
         elif [ -S "$_tts_sock" ]; then
             _SOCK="$_tts_sock"; CHANNEL="tts"
