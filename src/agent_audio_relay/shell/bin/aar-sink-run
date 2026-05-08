@@ -1,0 +1,9 @@
+#!/bin/bash
+# aar-sink-run — run a command with PULSE_SINK pointed at the AAR sink, so
+# its audio routes through the null-sink that aar-sink-stream is reading.
+#
+#   aar-sink-run mpv ./song.mp3
+#   aar-sink-run firefox
+#   AAR_SINK=otherchannel aar-sink-run …
+SINK="${AAR_SINK:-aar}"
+exec env PULSE_SINK="$SINK" "$@"

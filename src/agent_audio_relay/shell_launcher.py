@@ -34,11 +34,19 @@ def tts_popup() -> None:          _exec("bin/tts-popup")
 def tts_pick() -> None:           _exec("bin/tts-pick")
 def tts_status_line() -> None:    _exec("bin/tts-status-line")
 def mpv_tunnel() -> None:         _exec("bin/aar-mpv-tunnel")
+def sink_connect() -> None:       _exec("bin/aar-sink-connect")
+def sink_run() -> None:           _exec("bin/aar-sink-run")
 def forwarder() -> None:          _exec("bin/agent-audio-relay-forwarder.sh")
 def claude_code_hook() -> None:   _exec("hooks/claude-code-tts-hook.sh")
 def opencode_hook() -> None:      _exec("hooks/opencode-tts-hook.sh")
 def codex_hook() -> None:         _exec("hooks/codex-tts-hook.sh")
 def ha_bridge() -> None:          _exec("hooks/ha-tts-bridge.sh")
+
+
+def sink_stream() -> None:
+    """Native Python entry point — sink_stream is a Python module, not a shell script."""
+    from .sink_stream import main
+    sys.exit(main())
 
 
 def tts_tmux_install() -> None:

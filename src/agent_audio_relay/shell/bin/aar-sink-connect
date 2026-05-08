@@ -1,0 +1,21 @@
+#!/bin/bash
+# aar-sink-connect — point the local mpv-music at an aar-sink-stream URL.
+#
+#   aar-sink-connect [host] [port]
+#
+# Defaults: host=localhost, port=$AAR_SINK_PORT or 7771.
+# Targets $AAR_MUSIC_SOCK if set, else the standard local mpv-music socket
+# (which goes through aar-mpv-tunnel to the phone).
+set -u
+HOST="${1:-localhost}"
+PORT="${2:-${AAR_SINK_PORT:-7771}}"
+URL="http://${HOST}:${PORT}/sink.mp3"
+SOCK="${AAR_MUSIC_SOCK:-${XDG_STATE_HOME:-$HOME/.local/state}/agent-audio-relay/mpv-music.sock}"
+if [ ! -S "$SOCK" ]; then
+    echo "aar-sink-connect: music socket not found: $SOCK" >&2
+    echo "  is aar-mpv-tunnel running?  systemctl --user status aar-mpv-tunnel" >&2
+    exit 1
+fi
+( printf '%s\n' "{\"command\":[\"loadfile\",\"$URL\",\"replace\"]}"; sleep 0.3 ) \
+    | socat -t 2 - "UNIX-CONNECT:$SOCK" >/dev/null
+echo "aar-sink-connect: loaded $URL into mpv-music ($SOCK)" >&2

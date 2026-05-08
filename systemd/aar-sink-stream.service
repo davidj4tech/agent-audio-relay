@@ -1,0 +1,14 @@
+[Unit]
+Description=AAR sink stream — null-sink → ffmpeg → HTTP MP3 fan-out
+# Wait for PipeWire's PA shim before binding to the monitor source.
+After=pipewire-pulse.socket
+Wants=pipewire-pulse.socket
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/aar-sink-stream
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
