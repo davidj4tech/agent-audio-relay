@@ -60,10 +60,20 @@ def ensure_sink(name):
         parts = line.split("\t")
         if len(parts) > 1 and parts[1] == name:
             return None  # already exists; we don't own it
+    # Derive a human-readable description from the sink name. Without
+    # this, every null-sink showed up in pavucontrol as the same
+    # "AAR-Sink" label, indistinguishable in the device picker once you
+    # had more than one (e.g. `aar` + `aar-music`).
+    if name == "aar":
+        label = "general"
+    elif name.startswith("aar-"):
+        label = name[4:]
+    else:
+        label = name
     res = _pactl(
         "load-module", "module-null-sink",
         f"sink_name={name}",
-        "sink_properties=device.description=AAR-Sink",
+        f"sink_properties=device.description=AAR-{label}",
     )
     if res.returncode != 0:
         raise RuntimeError(f"failed to create null-sink: {res.stderr.strip()}")
