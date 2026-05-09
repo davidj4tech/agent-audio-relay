@@ -49,6 +49,12 @@ def sink_stream() -> None:
     sys.exit(main())
 
 
+def clip_server() -> None:
+    """Native Python entry point — clip_server serves AAR archive clips over HTTP."""
+    from .clip_server import main
+    sys.exit(main())
+
+
 def tts_tmux_install() -> None:
     """Exec the packaged tts.tmux to register the popup/status bindings.
 

@@ -1,0 +1,14 @@
+[Unit]
+Description=AAR clip server — HTTP file server for finished archive clips
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/aar-clip-server
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

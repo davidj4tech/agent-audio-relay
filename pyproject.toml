@@ -42,6 +42,7 @@ tts-tmux-install               = "agent_audio_relay.shell_launcher:tts_tmux_inst
 tts-status-line                = "agent_audio_relay.shell_launcher:tts_status_line"
 aar-mpv-tunnel                 = "agent_audio_relay.shell_launcher:mpv_tunnel"
 aar-sink-stream                = "agent_audio_relay.shell_launcher:sink_stream"
+aar-clip-server                = "agent_audio_relay.shell_launcher:clip_server"
 aar-sink-connect               = "agent_audio_relay.shell_launcher:sink_connect"
 aar-sink-run                   = "agent_audio_relay.shell_launcher:sink_run"
 aar-setup                      = "agent_audio_relay.setup_cli:main"
@@ -66,6 +67,7 @@ packages = ["src/agent_audio_relay"]
 # them via `Path(__file__).parent / "systemd/"` after `pip install`.
 "systemd/aar-mpv-tunnel.service"               = "agent_audio_relay/systemd/aar-mpv-tunnel.service"
 "systemd/aar-sink-stream.service"              = "agent_audio_relay/systemd/aar-sink-stream.service"
+"systemd/aar-clip-server.service"              = "agent_audio_relay/systemd/aar-clip-server.service"
 "systemd/agent-audio-relay-forwarder.service"  = "agent_audio_relay/systemd/agent-audio-relay-forwarder.service"
 "systemd/agent-audio-relay.service"            = "agent_audio_relay/systemd/agent-audio-relay.service"
 "systemd/opencode-tts-watcher.service"         = "agent_audio_relay/systemd/opencode-tts-watcher.service"
