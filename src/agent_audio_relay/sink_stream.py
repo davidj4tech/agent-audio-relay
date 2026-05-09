@@ -162,12 +162,21 @@ class Encoder:
         self._setup_done = False
 
     def start(self):
+        # `-fflags nobuffer` + `-flush_packets 1` keep ffmpeg's output
+        # tight so a pause on the source side is reflected in the HTTP
+        # stream within a frame, not after several seconds of muxer
+        # buffering. Same idea as `-tune zerolatency` for video.
+        common_input = [
+            "ffmpeg",
+            "-loglevel", "warning",
+            "-fflags", "nobuffer",
+            "-flush_packets", "1",
+            "-f", "pulse",
+            "-fragment_size", "1024",
+            "-i", f"{self.sink_name}.monitor",
+        ]
         if self.codec == "opus":
-            cmd = [
-                "ffmpeg",
-                "-loglevel", "warning",
-                "-f", "pulse",
-                "-i", f"{self.sink_name}.monitor",
+            cmd = common_input + [
                 "-c:a", "libopus",
                 "-b:a", self.bitrate,
                 "-application", "lowdelay",
@@ -176,11 +185,7 @@ class Encoder:
                 "-",
             ]
         elif self.codec == "mp3":
-            cmd = [
-                "ffmpeg",
-                "-loglevel", "warning",
-                "-f", "pulse",
-                "-i", f"{self.sink_name}.monitor",
+            cmd = common_input + [
                 "-c:a", "libmp3lame",
                 "-b:a", self.bitrate,
                 "-f", "mp3",
@@ -244,7 +249,14 @@ class Encoder:
                 self.subscribers.clear()
 
     def subscribe(self):
-        q = queue.Queue(maxsize=128)
+        # Tight queue: each chunk is ~4 KB of encoded audio (~250 ms at
+        # 128 kbps Opus), so maxsize=8 caps producer→consumer buffering
+        # at ~2 s. Was 128 (~32 s) — enough that brief consumer hiccups
+        # let the queue fill and then the buffered audio took ~10 s to
+        # drain through the player after the source paused. Smaller
+        # queue means a stuck consumer is evicted earlier rather than
+        # silently growing latency for everyone.
+        q = queue.Queue(maxsize=8)
         # Prepend codec setup bytes (Opus only) so a mid-stream subscriber
         # sees the OpusHead/OpusTags pages before live audio. Done before
         # the queue joins `self.subscribers`, so the setup bytes can't
