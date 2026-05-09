@@ -17,6 +17,8 @@ Attaching a player:
     aar-sink-connect <host>      # tells mpv-music to loadfile the URL
 """
 
+from __future__ import annotations
+
 import argparse
 import http.server
 import os
@@ -73,6 +75,44 @@ def unload_module(module_id):
         _pactl("unload-module", module_id)
 
 
+def _scan_ogg_setup(buf: bytes, page_count: int) -> tuple[int, int] | None:
+    """Walk Ogg pages from the start of `buf`, returning (bytes_through_n_pages,
+    pages_seen) once `page_count` pages have been fully buffered, else None.
+
+    For Ogg-Opus, the first two pages carry the codec setup (OpusHead,
+    OpusTags). New HTTP subscribers connecting mid-stream miss those if
+    we don't replay them, and Opus-in-Ogg requires them — without them
+    every consumer reports `[ffmpeg/demuxer] ogg: Codec not found`. By
+    capturing the first N pages once and prepending those bytes to each
+    new subscriber's queue, mid-stream connection works the same as a
+    fresh decoder seeing the bitstream from byte zero.
+
+    Page format reference: each page starts with the magic `OggS`,
+    a 23-byte fixed header, a 1-byte segment count, that many segment
+    lengths, and finally the segment payloads (whose total length is the
+    sum of the segment table). So a page is 27 + n_segments +
+    sum(segment_table) bytes long.
+    """
+    pos = 0
+    seen = 0
+    while seen < page_count:
+        if pos + 27 > len(buf):
+            return None
+        if buf[pos:pos + 4] != b"OggS":
+            return None  # not Ogg, or stream desynced; caller should give up
+        n_segments = buf[pos + 26]
+        header_end = pos + 27 + n_segments
+        if header_end > len(buf):
+            return None
+        payload_len = sum(buf[pos + 27:header_end])
+        page_end = header_end + payload_len
+        if page_end > len(buf):
+            return None
+        pos = page_end
+        seen += 1
+    return pos, seen
+
+
 class Encoder:
     """ffmpeg pipeline reading the sink monitor and producing encoded
     audio bytes on stdout. Bytes are fanned out to subscribed Queue
@@ -83,7 +123,17 @@ class Encoder:
     `-application lowdelay` — gives ~10 ms encoder latency vs ~50-100 ms
     for MP3, with similar perceived quality at half the bitrate. mpv
     decodes Opus natively.
+
+    For Opus, the first two Ogg pages (OpusHead, OpusTags) are cached
+    via `_scan_ogg_setup` and prepended to every new subscriber so a
+    mid-stream connection still has the codec metadata it needs. MP3
+    has no equivalent stream-level setup so this fast-path is skipped.
     """
+
+    # Number of leading Ogg pages that contain Opus codec setup. OpusHead
+    # is page 0 (BOS), OpusTags is page 1 — together they're a few hundred
+    # bytes and need to land at the start of every subscriber's stream.
+    _OPUS_SETUP_PAGES = 2
 
     def __init__(self, sink_name, bitrate, codec="opus"):
         self.sink_name = sink_name
@@ -92,6 +142,14 @@ class Encoder:
         self.proc = None
         self.subscribers = []
         self.lock = threading.Lock()
+        # Codec setup bytes captured from the start of the ffmpeg stream;
+        # prepended to each new subscriber's queue (Opus only — see class
+        # docstring). `None` until enough pages have arrived; an empty
+        # bytes value means we gave up (e.g. stream desync) and new
+        # subscribers won't get a setup prefix.
+        self._setup_bytes: bytes | None = None
+        self._setup_buf = bytearray()
+        self._setup_done = False
 
     def start(self):
         if self.codec == "opus":
@@ -125,12 +183,36 @@ class Encoder:
         )
         threading.Thread(target=self._reader, daemon=True).start()
 
+    def _capture_setup(self, chunk: bytes) -> None:
+        """For Opus, accumulate ffmpeg output until the first N Ogg pages
+        are buffered, then snapshot them as `_setup_bytes` for replay to
+        new subscribers. No-op once setup is done or for non-Opus codecs.
+        """
+        if self._setup_done or self.codec != "opus":
+            return
+        self._setup_buf.extend(chunk)
+        result = _scan_ogg_setup(bytes(self._setup_buf), self._OPUS_SETUP_PAGES)
+        if result is None:
+            # Need more bytes (or stream isn't Ogg — bail if we've buffered
+            # well past where headers should be without finding pages).
+            if len(self._setup_buf) > 64 * 1024:
+                self._setup_bytes = b""
+                self._setup_done = True
+                self._setup_buf.clear()
+            return
+        consumed, _ = result
+        self._setup_bytes = bytes(self._setup_buf[:consumed])
+        self._setup_done = True
+        self._setup_buf.clear()
+
     def _reader(self):
         try:
             while True:
                 chunk = self.proc.stdout.read(4096)
                 if not chunk:
                     break
+                if not self._setup_done:
+                    self._capture_setup(chunk)
                 with self.lock:
                     for q in list(self.subscribers):
                         try:
@@ -153,6 +235,17 @@ class Encoder:
 
     def subscribe(self):
         q = queue.Queue(maxsize=128)
+        # Prepend codec setup bytes (Opus only) so a mid-stream subscriber
+        # sees the OpusHead/OpusTags pages before live audio. Done before
+        # the queue joins `self.subscribers`, so the setup bytes can't
+        # interleave with a live chunk that arrives concurrently — by the
+        # time the producer can hand a chunk to this queue, the setup is
+        # already at the head of it.
+        if self._setup_bytes:
+            try:
+                q.put_nowait(self._setup_bytes)
+            except queue.Full:
+                pass
         with self.lock:
             self.subscribers.append(q)
         return q
