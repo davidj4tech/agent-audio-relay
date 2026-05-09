@@ -1,0 +1,149 @@
+#!/bin/bash
+# aar-where — choose which hosts play an AAR stream channel.
+#
+# AAR exposes one or more HTTP audio streams on mel (one per null-sink
+# wrapped by aar-sink-stream). Each output host runs a small mpv consumer
+# that pulls the URL — joining = starting that consumer; leaving = stopping.
+#
+# Channels (defined in config; default channels are `music` and `general`):
+#   music    — http://mel:7772/sink.mp3 (aar-music sink, ducks separately)
+#   general  — http://mel:7771/sink.mp3 (aar sink: anything routed via
+#              `pactl set-default-sink aar`, `aar-sink-run`, etc.)
+#
+# Config: ~/.config/agent-audio-relay/aar-where.json:
+#
+#   {
+#     "channels": {
+#       "music": {
+#         "hosts": {
+#           "phone": {
+#             "ssh":    "p8ar",
+#             "start":  "SVDIR=$PREFIX/var/service sv up mpv-aar-music",
+#             "stop":   "SVDIR=$PREFIX/var/service sv down mpv-aar-music",
+#             "status": "SVDIR=$PREFIX/var/service sv status mpv-aar-music"
+#           }
+#         }
+#       },
+#       "general": { "hosts": { ... } }
+#     }
+#   }
+#
+# Usage:
+#   aar-where <channel> list                  # state per host on this channel
+#   aar-where <channel> add <host>            # join host
+#   aar-where <channel> remove <host>         # leave host
+#   aar-where <channel> only <host>           # join host, leave all others
+#
+# `host` is the JSON key (e.g. "phone"), not the ssh alias.
+
+set -euo pipefail
+
+CONFIG="${AAR_WHERE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/agent-audio-relay/aar-where.json}"
+
+die()  { echo "aar-where: $*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+if ! have jq; then
+    die "jq is required (Fedora: dnf install jq, Debian: apt install jq)"
+fi
+
+if [ ! -f "$CONFIG" ]; then
+    die "config not found: $CONFIG (see header for example schema)"
+fi
+
+usage() {
+    sed -n '2,/^$/p' "$0" | sed 's/^# \?//' >&2
+    exit 1
+}
+
+CHANNEL="${1:-}"
+[ -z "$CHANNEL" ] && usage
+case "$CHANNEL" in
+    -h|--help|help) usage ;;
+esac
+shift || true
+
+# Validate channel up-front so unrelated typos surface clearly.
+channel_exists=$(jq -r --arg c "$CHANNEL" '.channels[$c] // empty | type' "$CONFIG")
+[ -z "$channel_exists" ] && die "unknown channel: $CHANNEL (known: $(jq -r '.channels | keys | join(", ")' "$CONFIG"))"
+
+field() {
+    # $1=host  $2=field
+    jq -r --arg c "$CHANNEL" --arg h "$1" --arg f "$2" \
+        '.channels[$c].hosts[$h][$f] // empty' "$CONFIG"
+}
+
+hosts() {
+    jq -r --arg c "$CHANNEL" '.channels[$c].hosts | keys[]' "$CONFIG"
+}
+
+ssh_for() {
+    local v
+    v=$(field "$1" ssh)
+    [ -z "$v" ] && die "unknown host on '$CHANNEL': $1 (known: $(hosts | tr '\n' ' '))"
+    echo "$v"
+}
+
+run_remote() {
+    # $1=host-key  $2=field  $3=label-on-error
+    local host sshhost cmd
+    host="$1"
+    sshhost=$(ssh_for "$host")
+    cmd=$(field "$host" "$2")
+    [ -z "$cmd" ] && die "host '$host' on '$CHANNEL' has no '$2' command"
+    if ! ssh -o BatchMode=yes -o ConnectTimeout=10 "$sshhost" "$cmd"; then
+        echo "aar-where: ${3:-$2} failed for $host ($sshhost) on $CHANNEL" >&2
+        return 1
+    fi
+}
+
+cmd_add() {
+    local h="${1:?host}"
+    run_remote "$h" start "start"
+    echo "aar-where[$CHANNEL]: $h → playing"
+}
+
+cmd_remove() {
+    local h="${1:?host}"
+    run_remote "$h" stop "stop"
+    echo "aar-where[$CHANNEL]: $h → silent"
+}
+
+cmd_only() {
+    local target="${1:?host}"
+    ssh_for "$target" >/dev/null  # validate before we start stopping others
+    local h
+    for h in $(hosts); do
+        if [ "$h" = "$target" ]; then
+            cmd_add "$h"
+        else
+            cmd_remove "$h" || true
+        fi
+    done
+}
+
+cmd_list() {
+    local h sshhost cmd state
+    printf "channel: %s\n" "$CHANNEL"
+    printf "%-12s %-10s %s\n" "HOST" "SSH" "STATE"
+    for h in $(hosts); do
+        sshhost=$(ssh_for "$h")
+        cmd=$(field "$h" status)
+        if [ -z "$cmd" ]; then
+            state="(no status command configured)"
+        else
+            state=$(ssh -o BatchMode=yes -o ConnectTimeout=5 "$sshhost" "$cmd" 2>&1 | head -1 || true)
+            [ -z "$state" ] && state="(unreachable)"
+        fi
+        printf "%-12s %-10s %s\n" "$h" "$sshhost" "$state"
+    done
+}
+
+case "${1:-}" in
+    list|status)         shift; cmd_list "$@" ;;
+    add|join)            shift; cmd_add "$@" ;;
+    remove|leave|stop)   shift; cmd_remove "$@" ;;
+    only)                shift; cmd_only "$@" ;;
+    -h|--help|help|"")   usage ;;
+    *) die "unknown subcommand: $1 (try: list, add, remove, only)" ;;
+esac
