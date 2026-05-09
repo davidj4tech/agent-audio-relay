@@ -35,6 +35,10 @@ PREREQS: dict[str, list[tuple[str, dict[str, str]]]] = {
         ("pactl",  {"fedora": "pulseaudio-utils", "debian": "pulseaudio-utils"}),
         ("ffmpeg", {"fedora": "ffmpeg",           "debian": "ffmpeg"}),
     ],
+    "aar-sink-stream-music": [
+        ("pactl",  {"fedora": "pulseaudio-utils", "debian": "pulseaudio-utils"}),
+        ("ffmpeg", {"fedora": "ffmpeg",           "debian": "ffmpeg"}),
+    ],
     "aar-clip-server": [],
     "agent-audio-relay-forwarder": [
         ("rsync", {"fedora": "rsync",            "debian": "rsync"}),
