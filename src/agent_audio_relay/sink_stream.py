@@ -74,30 +74,52 @@ def unload_module(module_id):
 
 
 class Encoder:
-    """ffmpeg pipeline reading the sink monitor and producing MP3 bytes
-    on stdout. Bytes are fanned out to subscribed Queue consumers; a
-    consumer whose queue fills (slow client) is dropped so the producer
-    can never stall on one bad listener.
+    """ffmpeg pipeline reading the sink monitor and producing encoded
+    audio bytes on stdout. Bytes are fanned out to subscribed Queue
+    consumers; a consumer whose queue fills (slow client) is dropped so
+    the producer can never stall on one bad listener.
+
+    Default codec is Opus in an Ogg container with 10 ms frames and
+    `-application lowdelay` — gives ~10 ms encoder latency vs ~50-100 ms
+    for MP3, with similar perceived quality at half the bitrate. mpv
+    decodes Opus natively.
     """
 
-    def __init__(self, sink_name, bitrate):
+    def __init__(self, sink_name, bitrate, codec="opus"):
         self.sink_name = sink_name
         self.bitrate = bitrate
+        self.codec = codec
         self.proc = None
         self.subscribers = []
         self.lock = threading.Lock()
 
     def start(self):
-        cmd = [
-            "ffmpeg",
-            "-loglevel", "warning",
-            "-f", "pulse",
-            "-i", f"{self.sink_name}.monitor",
-            "-c:a", "libmp3lame",
-            "-b:a", self.bitrate,
-            "-f", "mp3",
-            "-",
-        ]
+        if self.codec == "opus":
+            cmd = [
+                "ffmpeg",
+                "-loglevel", "warning",
+                "-f", "pulse",
+                "-i", f"{self.sink_name}.monitor",
+                "-c:a", "libopus",
+                "-b:a", self.bitrate,
+                "-application", "lowdelay",
+                "-frame_duration", "10",
+                "-f", "ogg",
+                "-",
+            ]
+        elif self.codec == "mp3":
+            cmd = [
+                "ffmpeg",
+                "-loglevel", "warning",
+                "-f", "pulse",
+                "-i", f"{self.sink_name}.monitor",
+                "-c:a", "libmp3lame",
+                "-b:a", self.bitrate,
+                "-f", "mp3",
+                "-",
+            ]
+        else:
+            raise ValueError(f"unknown codec: {self.codec}")
         self.proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=sys.stderr, bufsize=0,
         )
@@ -151,6 +173,9 @@ class Encoder:
                 self.proc.kill()
 
 
+CONTENT_TYPES = {"opus": "audio/ogg", "mp3": "audio/mpeg"}
+
+
 class StreamHandler(http.server.BaseHTTPRequestHandler):
     encoder = None  # bound per-server class
 
@@ -158,7 +183,8 @@ class StreamHandler(http.server.BaseHTTPRequestHandler):
         pass
 
     def _headers(self):
-        self.send_header("Content-Type", "audio/mpeg")
+        self.send_header("Content-Type",
+                         CONTENT_TYPES.get(self.encoder.codec, "audio/mpeg"))
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "close")
         # Deliberately no Accept-Ranges — same reasoning as tts_stream:
@@ -200,7 +226,11 @@ def main():
     p.add_argument("--port", type=int,
                    default=int(os.environ.get("AAR_SINK_PORT", "7771")))
     p.add_argument("--bind", default=os.environ.get("AAR_SINK_BIND", "0.0.0.0"))
-    p.add_argument("--bitrate", default=os.environ.get("AAR_SINK_BITRATE", "192k"))
+    p.add_argument("--bitrate", default=os.environ.get("AAR_SINK_BITRATE", "128k"),
+                   help="encoder bitrate (default: 128k — Opus is roughly twice as efficient as MP3)")
+    p.add_argument("--codec", default=os.environ.get("AAR_SINK_CODEC", "opus"),
+                   choices=["opus", "mp3"],
+                   help="encoder codec (default: opus — ~10ms encoder latency vs MP3's ~50-100ms)")
     args = p.parse_args()
 
     try:
@@ -209,7 +239,7 @@ def main():
         print(f"aar-sink-stream: {e}", file=sys.stderr)
         return 2
 
-    encoder = Encoder(args.sink, args.bitrate)
+    encoder = Encoder(args.sink, args.bitrate, codec=args.codec)
     encoder.start()
 
     handler_cls = type("Handler", (StreamHandler,), {"encoder": encoder})
@@ -223,8 +253,13 @@ def main():
         return 1
 
     host = socket.gethostname()
-    url = f"http://{host}:{args.port}/sink.mp3"
-    print(f"aar-sink-stream: sink='{args.sink}', stream={url}", flush=True)
+    ext = "opus" if args.codec == "opus" else "mp3"
+    # Path is cosmetic — the server returns the live encoder stream
+    # regardless of path — but we expose a readable URL for logs and
+    # for consumers that pick up content type from the suffix.
+    url = f"http://{host}:{args.port}/sink.{ext}"
+    print(f"aar-sink-stream: sink='{args.sink}', codec={args.codec}, stream={url}",
+          flush=True)
 
     stop_event = threading.Event()
 
