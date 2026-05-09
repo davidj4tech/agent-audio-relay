@@ -141,27 +141,54 @@ def pad_audio(path: Path) -> None:
         padded.unlink(missing_ok=True)
 
 
-def process_queue(resolve: Callable[[], PlaybackBackend]) -> None:
-    """Deliver all queued files in order, resolving the backend per file."""
-    for queued in sorted(QUEUE_DIR.iterdir()):
-        if not queued.is_file():
-            continue
-        # Skip non-audio companions (e.g. `<stem>.txt` sidecars). They
-        # ride along in the queue dir so backends can archive them
-        # next to the audio, but they aren't playable themselves.
-        if queued.suffix.lstrip(".") not in AUDIO_EXTS:
-            continue
-        backend = resolve()
-        backend.wait_for_playback()
-        pad_audio(queued)
-        ok = backend.play(queued)
-        log(f"{'PLAY:OK' if ok else 'PLAY:FAILED'} ({queued.name}) via {backend.name}")
-        queued.unlink(missing_ok=True)
-        # Companion sidecar cleanup. The backend has already archived
-        # it (mpv backend's `_update_latest`), so the queue copy is
-        # done with.
-        sidecar = queued.with_suffix(".txt")
-        sidecar.unlink(missing_ok=True)
+def process_queue(resolve: Callable[[], PlaybackBackend], ducker=None) -> None:
+    """Deliver all queued files in order, resolving the backend per file.
+
+    If `ducker` is provided, it's `duck()`-ed before the first clip and
+    `restore()`-ed once the last clip has finished playing — keeps
+    Snapcast music streams quiet during speech without toggling per
+    clip when several arrive in a row.
+    """
+    played_any = False
+    last_backend = None
+    try:
+        for queued in sorted(QUEUE_DIR.iterdir()):
+            if not queued.is_file():
+                continue
+            # Skip non-audio companions (e.g. `<stem>.txt` sidecars). They
+            # ride along in the queue dir so backends can archive them
+            # next to the audio, but they aren't playable themselves.
+            if queued.suffix.lstrip(".") not in AUDIO_EXTS:
+                continue
+            backend = resolve()
+            backend.wait_for_playback()
+            if not played_any and ducker is not None:
+                ducker.duck()
+            pad_audio(queued)
+            ok = backend.play(queued)
+            log(f"{'PLAY:OK' if ok else 'PLAY:FAILED'} ({queued.name}) via {backend.name}")
+            queued.unlink(missing_ok=True)
+            # Companion sidecar cleanup. The backend has already archived
+            # it (mpv backend's `_update_latest`), so the queue copy is
+            # done with.
+            sidecar = queued.with_suffix(".txt")
+            sidecar.unlink(missing_ok=True)
+            played_any = True
+            last_backend = backend
+    finally:
+        if played_any and ducker is not None:
+            # Wait for the final clip's playback to actually finish
+            # before un-ducking so the music doesn't surge back over
+            # the tail of the speech.
+            if last_backend is not None:
+                try:
+                    last_backend.wait_for_playback()
+                except Exception:
+                    pass
+            try:
+                ducker.restore()
+            except Exception:
+                pass
 
 
 def enqueue_file(filepath: str) -> bool:
@@ -273,6 +300,19 @@ def watch() -> None:
     for d in WATCH_DIRS:
         Path(d).mkdir(parents=True, exist_ok=True)
 
+    # Optional Snapcast ducker — drops music-stream volumes during
+    # speech, then restores. No-op when RELAY_SNAPCAST_SERVERS is unset
+    # (default), so behavior is unchanged for setups not using
+    # Snapcast.
+    from .snapcast_duck import SnapcastDucker
+    ducker = SnapcastDucker.from_env()
+    if ducker.enabled:
+        log(
+            f"Snapcast ducking active (servers={ducker.servers}, "
+            f"streams={sorted(ducker.music_streams)}, "
+            f"duck_percent={ducker.duck_percent})"
+        )
+
     cache: dict[tuple[str, str | None], PlaybackBackend] = {}
     current: list[tuple[str, str | None] | None] = [None]
 
@@ -315,7 +355,7 @@ def watch() -> None:
         except OSError:
             pass
         enqueue_file(filepath)
-        process_queue(resolve)
+        process_queue(resolve, ducker=ducker)
         trim_state()
 
     for d in WATCH_DIRS:
