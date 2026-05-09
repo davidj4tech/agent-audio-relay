@@ -17,6 +17,13 @@ ExecStart=%h/.local/bin/agent-audio-relay
 #                 mid-playback.)
 Environment=RELAY_BACKEND=mpv
 Environment=RELAY_MPV_SOCKET=/tmp/mpv-relay.sock
+# Cross-host: when the mpv at the other end of RELAY_MPV_SOCKET is
+# remote (e.g. the socket is forwarded over SSH to a phone), set
+# RELAY_MPV_HTTP_BASE to a host:port running aar-clip-server pointing
+# at the same archive dir. The watcher then loadfiles
+# `http://<base>/<archive-name>` instead of a local path the remote
+# mpv can't see. Leave unset for same-host setups.
+# Environment=RELAY_MPV_HTTP_BASE=mel:7773
 # ssh-termux backend settings (uncomment if RELAY_BACKEND=ssh-termux):
 # Environment=RELAY_SSH_HOST=p8ar
 # Environment=RELAY_TERMUX_PLAYER=mpv-ipc

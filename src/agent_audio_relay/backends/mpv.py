@@ -31,6 +31,12 @@ class MpvBackend(PlaybackBackend):
         self.ipc_socket = os.environ.get("RELAY_MPV_SOCKET", "")
         self.extra_args = os.environ.get("RELAY_MPV_ARGS", "").split() if os.environ.get("RELAY_MPV_ARGS") else []
         self.wait = os.environ.get("RELAY_MPV_WAIT", "1") == "1"
+        # When set, loadfile sends `http://<base>/<archive-name>` instead
+        # of a local path. Lets a single mpv backend drive any reachable
+        # mpv — local OR remote — without per-clip scp. The base host
+        # must run aar-clip-server pointing at the same archive dir we
+        # write into via _update_latest().
+        self.http_base = os.environ.get("RELAY_MPV_HTTP_BASE", "").strip().rstrip("/")
         self.target = target
         self._proc: subprocess.Popen | None = None
 
@@ -163,7 +169,17 @@ class MpvBackend(PlaybackBackend):
             # files behind the paused one, so the entire watcher queue
             # silently stalls until someone manually resumes playback.
             self._send_ipc(["set_property", "pause", False])
-            resp = self._send_ipc(["loadfile", str(playable), "append-play"])
+            # When RELAY_MPV_HTTP_BASE is set, send a URL — the mpv on
+            # the other end fetches the file over HTTP from the
+            # clip-server, so the loadfile path doesn't need to exist on
+            # the mpv host's filesystem (the case for a forwarded socket
+            # pointing at a remote mpv). Local mpv works the same way:
+            # loadfile <url> just goes to localhost.
+            if self.http_base:
+                playable_arg = f"http://{self.http_base}/{playable.name}"
+            else:
+                playable_arg = str(playable)
+            resp = self._send_ipc(["loadfile", playable_arg, "append-play"])
             if resp and resp.get("error") == "success":
                 return True
             return False
@@ -182,5 +198,6 @@ class MpvBackend(PlaybackBackend):
     def describe(self) -> str:
         suffix = f" → {self.target}" if self.target else ""
         if self.ipc_socket:
-            return f"mpv (IPC: {self.ipc_socket}{suffix})"
+            mode = f"http://{self.http_base}" if self.http_base else "local-path"
+            return f"mpv (IPC: {self.ipc_socket}, src={mode}{suffix})"
         return f"mpv ({self.bin}{suffix})"
