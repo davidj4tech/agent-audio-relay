@@ -162,17 +162,18 @@ class Encoder:
         self._setup_done = False
 
     def start(self):
-        # `-fflags nobuffer` + `-flush_packets 1` keep ffmpeg's output
-        # tight so a pause on the source side is reflected in the HTTP
-        # stream within a frame, not after several seconds of muxer
-        # buffering. Same idea as `-tune zerolatency` for video.
+        # Plain pulse → encoder pipeline. Tried `-flush_packets 1`,
+        # `-fflags nobuffer`, and `-fragment_size 1024` to tighten
+        # producer-side buffering for pause/resume responsiveness, but
+        # they wedged ffmpeg's output for our stream (no bytes delivered
+        # past the codec setup pages). The visible end-to-end latency is
+        # dominated by client-side TCP RCV buffering anyway, not by
+        # producer-side muxer holdback, so the right place to push
+        # further is the consumer / network layer, not here.
         common_input = [
             "ffmpeg",
             "-loglevel", "warning",
-            "-fflags", "nobuffer",
-            "-flush_packets", "1",
             "-f", "pulse",
-            "-fragment_size", "1024",
             "-i", f"{self.sink_name}.monitor",
         ]
         if self.codec == "opus":
