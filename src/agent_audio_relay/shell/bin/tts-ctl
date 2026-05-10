@@ -168,9 +168,11 @@ replay_target() {
     if [ -d "$ARCHIVE_DIR" ]; then
         local stem
         if [ "$global_latest" = "1" ]; then
-            local newest
-            newest=$(ls -t1 "$ARCHIVE_DIR"/latest.* 2>/dev/null | head -n1)
-            [ -n "$newest" ] && { printf '%s' "$newest"; return; }
+            local newest ext
+            for ext in "${EXTS[@]}"; do
+                newest=$(ls -t1 "$ARCHIVE_DIR"/latest."$ext" 2>/dev/null | head -n1)
+                [ -n "$newest" ] && { printf '%s' "$newest"; return; }
+            done
         fi
         for stem in "${candidates[@]}"; do
             for ext in "${EXTS[@]}"; do
@@ -189,7 +191,7 @@ replay_target() {
         # fall through to a most-recent glob match for the session.
         local probe_script="" stem
         if [ "$global_latest" = "1" ]; then
-            probe_script+="ls -t1 $ARCHIVE_DIR/latest.* 2>/dev/null | head -n1; exit 0; "
+            probe_script+="for e in ${EXTS[*]}; do [ -e \"$ARCHIVE_DIR/latest.\$e\" ] && { echo \"$ARCHIVE_DIR/latest.\$e\"; exit 0; }; done; exit 1; "
         fi
         for stem in "${candidates[@]}"; do
             probe_script+="for e in ${EXTS[*]}; do [ -e \"$stem.\$e\" ] && { echo \"$stem.\$e\"; exit 0; }; done; "
@@ -278,6 +280,12 @@ case "${1:-}" in
         _need_reload=0
         if [ "$_idle" = "true" ] || [ "$_eof" = "true" ] || [ -z "$_cur" ]; then
             _need_reload=1
+        elif [ "$_sess" = "latest" ] || [ "$_sess" = "global" ] || [ "$_sess" = "--latest" ]; then
+            # Global/latest mode is popup-friendly: if *anything* is currently
+            # loaded mid-playback (including a previous/next history item the
+            # user navigated to), Space should simply pause/resume it. Only
+            # reload latest when idle/EOF/empty.
+            _need_reload=0
         elif [ -n "$_sess" ]; then
             _sslug=$(slug "$_sess")
             _curbase="${_cur##*/}"
