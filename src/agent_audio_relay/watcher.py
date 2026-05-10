@@ -93,6 +93,10 @@ _STATE_ROOT = _per_user_state_root()
 QUEUE_DIR = Path(os.environ.get("RELAY_QUEUE_DIR", str(_STATE_ROOT / "queue")))
 STATE_FILE = Path(os.environ.get("RELAY_STATE_FILE", str(_STATE_ROOT / "delivered.txt")))
 PAD_SILENCE = os.environ.get("RELAY_PAD_SILENCE", "1") == "1"
+# Back-compat for older pi extension builds that wrote audio directly without
+# the sibling `.play` marker. Restricted to `/tts-pi/` so archives elsewhere in
+# the relay cache don't accidentally publish themselves.
+ACCEPT_DIRECT_PI_AUDIO = os.environ.get("RELAY_ACCEPT_DIRECT_PI_AUDIO", "1") == "1"
 
 AUDIO_EXTS = {"mp3", "opus", "ogg", "wav"}
 
@@ -344,16 +348,26 @@ def watch() -> None:
     # files already on disk would otherwise sit forever. Same code path
     # as the inotify branch below — keeps "marker = publish" the only
     # contract anywhere.
-    def _handle_marker(marker: str) -> None:
-        if not marker.endswith(".play"):
-            return
-        filepath = marker[:-len(".play")]
-        if "/tts-" not in filepath:
-            return
-        try:
-            os.unlink(marker)
-        except OSError:
-            pass
+    def _handle_event(path: str) -> None:
+        if path.endswith(".play"):
+            filepath = path[:-len(".play")]
+            if "/tts-" not in filepath:
+                return
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        else:
+            # Legacy pi extension compatibility: it wrote final audio directly
+            # under tts-pi without a `.play` marker. Keep this narrow so other
+            # cached/archived audio remains marker-only.
+            if not ACCEPT_DIRECT_PI_AUDIO:
+                return
+            filepath = path
+            if "/tts-pi/" not in filepath:
+                return
+            if Path(filepath).suffix.lstrip(".") not in AUDIO_EXTS:
+                return
         enqueue_file(filepath)
         process_queue(resolve, ducker=ducker)
         trim_state()
@@ -362,7 +376,7 @@ def watch() -> None:
         for root, _, files in os.walk(d):
             for name in files:
                 if name.endswith(".play"):
-                    _handle_marker(os.path.join(root, name))
+                    _handle_event(os.path.join(root, name))
 
     inotify_cmd = ["inotifywait", "-m", "-r",
                    "-e", "close_write", "-e", "moved_to",
@@ -385,7 +399,7 @@ def watch() -> None:
     # already played live on a different channel) coexists in the
     # watch dir without triggering playback.
     for line in proc.stdout:
-        _handle_marker(line.strip())
+        _handle_event(line.strip())
 
 
 def main() -> None:
