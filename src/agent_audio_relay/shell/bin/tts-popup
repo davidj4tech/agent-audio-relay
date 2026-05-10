@@ -110,7 +110,14 @@ _state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/agent-audio-relay"
 _tts_sock="$_state_dir/mpv-tts.sock"
 _voice_sock="$_state_dir/mpv-voice.sock"
 _music_sock="$_state_dir/mpv-music.sock"
-_phone_tts_sock="/data/data/com.termux/files/usr/tmp/mpv-tts.sock"
+_termux_tmp="${PREFIX:-/data/data/com.termux/files/usr}/tmp"
+_phone_tts_sock="$_termux_tmp/mpv-tts.sock"
+# On the Termux playback host there may be no aar-mpv-tunnel sockets under
+# XDG_STATE_HOME; the real mpv IPC sockets live in $PREFIX/tmp. Fall back to
+# those so Tab can see voice/music locally instead of only the tts channel.
+[ -S "$_tts_sock" ]   || [ ! -S "$_termux_tmp/mpv-tts.sock" ]   || _tts_sock="$_termux_tmp/mpv-tts.sock"
+[ -S "$_voice_sock" ] || [ ! -S "$_termux_tmp/mpv-voice.sock" ] || _voice_sock="$_termux_tmp/mpv-voice.sock"
+[ -S "$_music_sock" ] || [ ! -S "$_termux_tmp/mpv-music.sock" ] || _music_sock="$_termux_tmp/mpv-music.sock"
 
 _probe_idle() {
     # Returns "active", "idle", or "unknown" for the given socket.
