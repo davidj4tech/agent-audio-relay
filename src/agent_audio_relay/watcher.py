@@ -364,9 +364,16 @@ def watch() -> None:
                 if name.endswith(".play"):
                     _handle_marker(os.path.join(root, name))
 
-    inotify_cmd = ["inotifywait", "-m", "-r",
+    # Termux's inotifywait has been observed to miss events from `-r` watches
+    # under the app-private home directory. Register each existing directory
+    # explicitly instead; producer drop dirs are created above / by setup.
+    watch_targets: list[str] = []
+    for d in WATCH_DIRS:
+        for root, dirs, _files in os.walk(d):
+            watch_targets.append(root)
+    inotify_cmd = ["inotifywait", "-m",
                    "-e", "close_write", "-e", "moved_to",
-                   "--format", "%w%f"] + WATCH_DIRS
+                   "--format", "%w%f"] + watch_targets
     if shutil.which("stdbuf"):
         inotify_cmd = ["stdbuf", "-oL"] + inotify_cmd
     try:

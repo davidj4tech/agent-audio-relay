@@ -1,3 +1,3 @@
 """agent-audio-relay: deliver coding-agent TTS audio to your phone."""
 
-__version__ = "0.3.8"
+__version__ = "0.3.9"
