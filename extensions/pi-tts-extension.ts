@@ -188,9 +188,24 @@ function ttsOpenAIRealtime(text: string, outfile: string, model: string, voice: 
 					audio: { output: { voice, format: { type: "audio/pcm", rate: 24000 } } },
 				},
 			}));
+			// Important: don't put `text` in response.instructions. Realtime
+			// treats instructions as a task to perform, so it may answer or
+			// summarize instead of speaking the text. Add the text as the user's
+			// message and instruct the model to read that message verbatim.
+			ws.send(JSON.stringify({
+				type: "conversation.item.create",
+				item: {
+					type: "message",
+					role: "user",
+					content: [{ type: "input_text", text }],
+				},
+			}));
 			ws.send(JSON.stringify({
 				type: "response.create",
-				response: { output_modalities: ["audio"], instructions: text },
+				response: {
+					output_modalities: ["audio"],
+					instructions: "Read the user message aloud verbatim. Do not answer, summarize, explain, translate, add commentary, or change wording. Preserve punctuation and expressive tone as spoken delivery.",
+				},
 			}));
 		};
 		ws.onerror = () => done(new Error("realtime websocket error"));
