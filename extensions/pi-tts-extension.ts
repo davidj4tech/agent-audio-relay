@@ -110,6 +110,12 @@ function defaultDropDir(): string {
 	return join(process.env.HOME || "/tmp", ".cache", "agent-audio-relay", "tts-pi");
 }
 
+function publishAudio(path: string): void {
+	// The relay daemon's publish contract is marker based: create the audio at
+	// its final path, then atomically-ish announce it with a sibling .play file.
+	writeFileSync(`${path}.play`, "");
+}
+
 function lastAssistantText(messages: any[]): string {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const m = messages[i];
@@ -312,6 +318,7 @@ export default function (pi: ExtensionAPI) {
 			const engine = (process.env.PI_TTS_ENGINE || "edge").toLowerCase();
 			const ext = (engine === "piper" || engine === "qwen") ? "wav" : "mp3";
 			const outfile = join(dropDir, `${makeStem("pi", "stop")}.${ext}`);
+			let published = outfile;
 
 			if (engine === "edge") {
 				await ttsEdge(text, outfile);
@@ -326,19 +333,22 @@ export default function (pi: ExtensionAPI) {
 					await ttsPiper(text, outfile);
 				} catch {
 					// Fall back to edge-mp3 if Piper is unreachable
-					await ttsEdge(text, outfile.replace(/\.\w+$/, ".mp3"));
+					published = outfile.replace(/\.\w+$/, ".mp3");
+					await ttsEdge(text, published);
 				}
 			} else if (engine === "qwen") {
 				try {
 					await ttsQwen(text, outfile);
 				} catch {
-					// Fall back to edge if DashScope fails
-					await ttsEdge(text, outfile);
+					// Fall back to edge-mp3 if DashScope fails
+					published = outfile.replace(/\.\w+$/, ".mp3");
+					await ttsEdge(text, published);
 				}
 			} else {
 				// Unknown engine: silent no-op (don't break the agent)
 				return;
 			}
+			publishAudio(published);
 		} catch {
 			// Never let TTS break the agent loop.
 		}
