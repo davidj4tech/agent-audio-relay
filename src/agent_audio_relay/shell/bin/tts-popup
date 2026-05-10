@@ -46,9 +46,7 @@ HELP_FILE=$(mktemp -t tts-popup-help.XXXXXX)
 cat > "$HELP_FILE" <<'EOF'
  TTS popup hotkeys
  ─────────────────
-   Space    play/pause; replay if clip
-            ended or different session
-            is loaded
+   Space    play/pause; replay most recent clip
    r        replay latest for session
    0        seek to start (no reload)
    h / l    seek -5s / +5s
@@ -848,11 +846,13 @@ while true; do
     _publish_sock
     case "$key" in
         ' '|p)
-            # tts: session-pinned toggle (replays archive's latest if idle).
+            # tts: global latest toggle. Popup Space means "the most recent
+            # thing I heard", regardless of the tmux session name. Use `r` for
+            # session-pinned replay.
             # music/voice: toggle if a clip is loaded; otherwise load the
             # newest from per-channel history (mpv-mcp records every play).
             if [ "$CHANNEL" = "tts" ]; then
-                ctl toggle "$SESSION" >/dev/null 2>&1 & disown
+                ctl toggle latest >/dev/null 2>&1 & disown
             else
                 _cur_path="${STATE[5]:-}"
                 if [ -n "$_cur_path" ] && [ "$_cur_path" != "null" ]; then

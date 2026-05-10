@@ -131,7 +131,11 @@ host_slug() {
 
 replay_target() {
     local session="$1"
-    if [ -z "$session" ] && [ -n "${TMUX_PANE:-}" ]; then
+    local global_latest=0
+    case "$session" in
+        latest|global|--latest) global_latest=1; session="" ;;
+    esac
+    if [ "$global_latest" != "1" ] && [ -z "$session" ] && [ -n "${TMUX_PANE:-}" ]; then
         session=$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)
     fi
     # Build candidate stems in priority order. Host-prefixed first so two
@@ -144,10 +148,8 @@ replay_target() {
         [ -n "$hslug" ] && candidates+=("$ARCHIVE_DIR/latest--$hslug--$sslug")
         candidates+=("$ARCHIVE_DIR/latest--$sslug")
     fi
-    # No global `latest` fallback by design — replaying a clip from another
-    # host/session is the bug session-pinning was added to fix. With no
-    # session and no candidates, the synthetic path below makes mpv error
-    # out visibly rather than silently misroute.
+    # Global latest is opt-in (`latest`/`global`/`--latest`) so normal
+    # session-pinned controls don't accidentally replay another session.
     # Prefer a remote-existing match; mpv loadfile of a missing path is
     # a silent no-op, which is worse UX than picking *something* and
     # letting mpv error out visibly.
@@ -165,6 +167,11 @@ replay_target() {
     # resolves on this host (i.e. we are the phone).
     if [ -d "$ARCHIVE_DIR" ]; then
         local stem
+        if [ "$global_latest" = "1" ]; then
+            local newest
+            newest=$(ls -t1 "$ARCHIVE_DIR"/latest.* 2>/dev/null | head -n1)
+            [ -n "$newest" ] && { printf '%s' "$newest"; return; }
+        fi
         for stem in "${candidates[@]}"; do
             for ext in "${EXTS[@]}"; do
                 [ -e "$stem.$ext" ] && { printf '%s' "$stem.$ext"; return; }
@@ -181,6 +188,9 @@ replay_target() {
         # Single ssh call: probe symlink candidates in priority order, then
         # fall through to a most-recent glob match for the session.
         local probe_script="" stem
+        if [ "$global_latest" = "1" ]; then
+            probe_script+="ls -t1 $ARCHIVE_DIR/latest.* 2>/dev/null | head -n1; exit 0; "
+        fi
         for stem in "${candidates[@]}"; do
             probe_script+="for e in ${EXTS[*]}; do [ -e \"$stem.\$e\" ] && { echo \"$stem.\$e\"; exit 0; }; done; "
         done

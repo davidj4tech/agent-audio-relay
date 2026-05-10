@@ -71,8 +71,8 @@ tmux bind -n "$POPUP_KEY" \
 
 # Direct toggle without opening the popup (fastest path).
 tmux bind -n "$TOGGLE_KEY" \
-    run-shell "tts-ctl toggle '#{session_name}'"
-tmux bind -T tts Space run-shell "tts-ctl toggle '#{session_name}'"
+    run-shell "tts-ctl toggle latest"
+tmux bind -T tts Space run-shell "tts-ctl toggle latest"
 tmux bind -T tts r     run-shell "tts-ctl replay '#{session_name}'"
 
 # status-right integration: append tts-status-line so a clip's progress is
