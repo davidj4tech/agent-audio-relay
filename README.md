@@ -62,6 +62,32 @@ openai engines additionally need their own runtime: `pip install
 edge-tts` and/or an `openai`-equipped Python (e.g.
 `pipx install openai`).
 
+### Termux/runit helper
+
+On Android/Termux hosts that use `termux-services`, AAR ships an
+idempotent helper for the local playback daemon and `mpv-tts` service:
+
+```sh
+# install or refresh runit service files
+pkg install termux-services mpv inotify-tools
+pip install --user agent-audio-relay
+aar-termux-setup install --start
+
+# later: pull latest source, reinstall, and restart services
+aar-termux-setup update --repo ~/projects/agent-audio-relay
+```
+
+Useful checks:
+
+```sh
+aar-termux-setup status
+sv status agent-audio-relay mpv-tts
+```
+
+The updater is safe to re-run. It performs `git pull --ff-only`,
+`python -m pip install --user --upgrade <repo>`, and restarts the runit
+services so long-running watchers pick up the newly installed code.
+
 ## Deployment topologies
 
 Pick one. Mixing them — running the relay daemon on the sender *and*

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-audio-relay"
-version = "0.3.4"
+version = "0.3.5"
 description = "Bidirectional voice interface for coding agents — TTS from agent responses to pluggable playback targets, with hooks for Claude Code, Codex, OpenCode, and Home Assistant"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -48,6 +48,7 @@ aar-sink-run                   = "agent_audio_relay.shell_launcher:sink_run"
 aar-where                      = "agent_audio_relay.shell_launcher:aar_where"
 aar-snap                       = "agent_audio_relay.aar_snap:main"
 aar-setup                      = "agent_audio_relay.setup_cli:main"
+aar-termux-setup               = "agent_audio_relay.termux_setup:main"
 claude-code-tts-hook           = "agent_audio_relay.shell_launcher:claude_code_hook"
 opencode-tts-hook              = "agent_audio_relay.shell_launcher:opencode_hook"
 codex-tts-hook                 = "agent_audio_relay.shell_launcher:codex_hook"
