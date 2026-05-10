@@ -228,6 +228,249 @@ fmt_time() {
     awk -v t="$t" 'BEGIN{ s=int(t); printf "%02d:%02d", s/60, s%60 }'
 }
 
+# Optional Mopidy/MPD backend for the music channel. Enable with:
+#   AAR_MUSIC_BACKEND=mopidy
+# The popup/status-line still pass the historical mpv-music socket path;
+# we use that as the signal that only the music channel should switch
+# backend, leaving tts/voice on mpv IPC.
+_is_mopidy_music() {
+    [ "${AAR_MUSIC_BACKEND:-}" = "mopidy" ] && [[ "$SOCK" == *mpv-music.sock* ]]
+}
+
+mpd_py() {
+    python3 - "$@" <<'PY'
+import json, os, socket, subprocess, sys, time
+host = os.environ.get("MOPIDY_MPD_HOST", "127.0.0.1")
+port = int(os.environ.get("MOPIDY_MPD_PORT", "6600"))
+cmd = sys.argv[1] if len(sys.argv) > 1 else "state"
+args = sys.argv[2:]
+
+def talk(commands):
+    if isinstance(commands, str):
+        commands = [commands]
+    out = []
+    with socket.create_connection((host, port), timeout=1.0) as s:
+        f = s.makefile("rwb", buffering=0)
+        hello = f.readline().decode("utf-8", "replace")
+        if not hello.startswith("OK MPD"):
+            raise SystemExit(2)
+        for c in commands:
+            f.write((c + "\n").encode())
+            block = []
+            while True:
+                line = f.readline().decode("utf-8", "replace").rstrip("\n")
+                if line == "OK":
+                    break
+                if line.startswith("ACK"):
+                    break
+                block.append(line)
+            out.append(block)
+    return out
+
+def kv(lines):
+    d = {}
+    for line in lines:
+        if ": " in line:
+            k, v = line.split(": ", 1)
+            d.setdefault(k, v)
+    return d
+
+def status_song():
+    st, sg = talk(["status", "currentsong"])
+    return kv(st), kv(sg)
+
+def duration(st, sg):
+    return sg.get("duration") or st.get("duration") or (st.get("time", ":").split(":", 1)[1] or "")
+
+def elapsed(st):
+    return st.get("elapsed") or (st.get("time", "0:").split(":", 1)[0] or "0")
+
+def q(s):
+    return '"' + str(s).replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+def youtube_video_id(uri):
+    if not uri:
+        return ""
+    if uri.startswith("youtube:video:"):
+        return uri.rsplit(":", 1)[-1]
+    if "youtube.com" in uri or "youtu.be" in uri:
+        from urllib.parse import parse_qs, urlparse
+        u = urlparse(uri)
+        if u.netloc.endswith("youtu.be"):
+            return u.path.strip("/").split("/", 1)[0]
+        return parse_qs(u.query).get("v", [""])[0]
+    return ""
+
+def youtube_chapter_title(uri, pos):
+    vid = youtube_video_id(uri)
+    if not vid:
+        return ""
+    try:
+        p = float(pos or 0)
+    except Exception:
+        p = 0.0
+    cache_dir = os.path.expanduser(os.environ.get(
+        "AAR_YOUTUBE_CHAPTER_CACHE",
+        "~/.cache/agent-audio-relay/youtube-chapters",
+    ))
+    os.makedirs(cache_dir, exist_ok=True)
+    cache = os.path.join(cache_dir, vid + ".json")
+    data = None
+    try:
+        if os.path.exists(cache) and time.time() - os.path.getmtime(cache) < 86400 * 7:
+            with open(cache, "r", encoding="utf-8") as f:
+                data = json.load(f)
+    except Exception:
+        data = None
+    if data is None:
+        try:
+            cp = subprocess.run(
+                ["yt-dlp", "--dump-single-json", "--skip-download", f"https://www.youtube.com/watch?v={vid}"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=20,
+            )
+            if cp.returncode == 0 and cp.stdout.strip():
+                data = json.loads(cp.stdout)
+                with open(cache, "w", encoding="utf-8") as f:
+                    json.dump({"chapters": data.get("chapters") or []}, f)
+            else:
+                data = {"chapters": []}
+        except Exception:
+            data = {"chapters": []}
+    chapters = data.get("chapters") or []
+    current = ""
+    for ch in chapters:
+        try:
+            start = float(ch.get("start_time") or 0)
+            end = ch.get("end_time")
+            end = float(end) if end is not None else 10**12
+        except Exception:
+            continue
+        if p >= start and p < end:
+            current = ch.get("title") or ""
+            break
+    return current
+
+try:
+    if cmd == "get":
+        props = args
+        st, sg = status_song()
+        state = st.get("state", "stop")
+        dur = duration(st, sg)
+        pos = elapsed(st) if state != "stop" else ""
+        path = sg.get("file", "")
+        vals = {
+            "pause": "true" if state == "pause" else "false" if state == "play" else "",
+            "idle-active": "true" if state == "stop" else "false",
+            "time-pos": pos,
+            "duration": dur,
+            "volume": st.get("volume", ""),
+            "path": path,
+            "mute": "true" if st.get("volume") == "0" else "false",
+            "media-title": sg.get("Title") or sg.get("Name") or path,
+            "chapter-metadata/title": youtube_chapter_title(path, pos) if "chapter-metadata/title" in props else "",
+            "user-data/aar/session": "",
+            "eof-reached": "false",
+        }
+        for p in props:
+            print(vals.get(p, ""))
+    elif cmd == "pause": talk("pause 1")
+    elif cmd == "resume": talk("pause 0")
+    elif cmd == "toggle": talk("pause")
+    elif cmd == "play": talk("play")
+    elif cmd == "stop": talk("stop")
+    elif cmd in ("next", "playlist-next", "next-history"): talk("next")
+    elif cmd in ("previous", "playlist-prev", "prev-history"):
+        st, _ = status_song()
+        try:
+            if float(elapsed(st)) > 5:
+                talk("seekcur 0")
+            else:
+                talk("previous")
+        except Exception:
+            talk("previous")
+    elif cmd == "start": talk("seekcur 0")
+    elif cmd == "seek":
+        st, _ = status_song(); target = max(0.0, float(elapsed(st) or 0) + float(args[0] if args else 5))
+        talk("seekcur %s" % target)
+    elif cmd == "seek-percent":
+        st, sg = status_song(); d = float(duration(st, sg) or 0); pct = float(args[0] if args else 50)
+        if d > 0: talk("seekcur %s" % (d * pct / 100.0))
+    elif cmd == "volume":
+        st, _ = status_song(); v = int(float(st.get("volume") or 0)); delta = int(float(args[0] if args else 5))
+        talk("setvol %d" % max(0, min(100, v + delta)))
+    elif cmd == "mute":
+        st, _ = status_song(); v = int(float(st.get("volume") or 0))
+        cache = os.path.expanduser(os.environ.get("AAR_MOPIDY_MUTE_CACHE", "~/.cache/agent-audio-relay/mopidy-volume"))
+        if v > 0:
+            os.makedirs(os.path.dirname(cache), exist_ok=True)
+            open(cache, "w").write(str(v))
+            talk("setvol 0")
+        else:
+            try: rv = int(open(cache).read().strip())
+            except Exception: rv = int(os.environ.get("AAR_MOPIDY_UNMUTE_VOLUME", "50"))
+            talk("setvol %d" % max(1, min(100, rv)))
+    elif cmd == "loadfile":
+        uri = args[0]
+        # Mopidy-YouTube wants youtube:video:<id>; accept normal YouTube
+        # share/watch/mobile URLs from callers and translate them here.
+        vid = youtube_video_id(uri)
+        if vid:
+            uri = "youtube:video:" + vid
+        talk("clear")
+        talk("add " + q(uri))
+        # Mopidy's MPD add can return before the backend has fully
+        # materialized async metadata; wait briefly so immediate Play from
+        # tts-popup/tts-ctl actually starts the newly-added YouTube item.
+        for _ in range(30):
+            st = kv(talk("status")[0])
+            if int(st.get("playlistlength", "0") or 0) > 0:
+                break
+            time.sleep(0.2)
+        talk("play 0")
+    elif cmd in ("slower", "faster", "speed", "set-cursor"):
+        pass
+    elif cmd == "nowplaying":
+        _, sg = status_song(); print(sg.get("file", ""))
+    else:
+        raise SystemExit(64)
+except Exception:
+    raise SystemExit(1)
+PY
+}
+
+if _is_mopidy_music; then
+    case "${1:-}" in
+        pause) mpd_py pause ;;
+        resume) mpd_py resume ;;
+        toggle) mpd_py toggle ;;
+        replay|play-latest-history) mpd_py play ;;
+        loadfile) [ -n "${2:-}" ] || { echo "Usage: tts-ctl --socket mpv-music.sock loadfile URI" >&2; exit 1; }; mpd_py loadfile "$2" ;;
+        playlist-prev|prev-history|prev) mpd_py prev-history ;;
+        playlist-next|next-history|next) mpd_py next-history ;;
+        seek) mpd_py seek "${2:-5}" ;;
+        seek-percent) mpd_py seek-percent "${2:-50}" ;;
+        start) mpd_py start ;;
+        volume) mpd_py volume "${2:-5}" ;;
+        mute) mpd_py mute ;;
+        slower|faster|speed|set-cursor) mpd_py "$1" "${2:-}" ;;
+        stop) mpd_py stop ;;
+        status)
+            mapfile -t _vals < <(mpd_py get pause idle-active time-pos duration volume)
+            paused="${_vals[0]:-}"; idle="${_vals[1]:-}"; pos="${_vals[2]:-}"; dur="${_vals[3]:-}"; vol="${_vals[4]:-}"
+            if [ "$idle" = "true" ] || [ -z "$paused" ]; then state="○ idle"; elif [ "$paused" = "true" ]; then state="⏸  PAUSED"; else state="▶  PLAYING"; fi
+            printf '%s  %s/%s  vol=%s\n' "$state" "$(fmt_time "$pos")" "$(fmt_time "$dur")" "${vol%.*}"
+            ;;
+        nowplaying) mpd_py nowplaying ;;
+        get) shift; [ $# -gt 0 ] || { echo "tts-ctl get: needs at least one property" >&2; exit 2; }; mpd_py get "$@" ;;
+        spoken-text) exit 1 ;;
+        *) echo "Usage: AAR_MUSIC_BACKEND=mopidy tts-ctl [--socket mpv-music.sock] pause|resume|toggle|loadfile|prev|next|seek|start|volume|mute|stop|status|nowplaying|get PROP..." >&2; exit 1 ;;
+    esac
+    exit $?
+fi
+
 case "${1:-}" in
     pause)   mpv_cmd '{"command":["set_property","pause",true]}'  >/dev/null ;;
     resume)  mpv_cmd '{"command":["set_property","pause",false]}' >/dev/null ;;

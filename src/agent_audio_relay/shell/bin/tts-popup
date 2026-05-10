@@ -118,6 +118,19 @@ _phone_tts_sock="$_termux_tmp/mpv-tts.sock"
 [ -S "$_tts_sock" ]   || [ ! -S "$_termux_tmp/mpv-tts.sock" ]   || _tts_sock="$_termux_tmp/mpv-tts.sock"
 [ -S "$_voice_sock" ] || [ ! -S "$_termux_tmp/mpv-voice.sock" ] || _voice_sock="$_termux_tmp/mpv-voice.sock"
 [ -S "$_music_sock" ] || [ ! -S "$_termux_tmp/mpv-music.sock" ] || _music_sock="$_termux_tmp/mpv-music.sock"
+_music_backend="${AAR_MUSIC_BACKEND:-mpv}"
+
+_is_mopidy_music_sock() {
+    [ "$_music_backend" = "mopidy" ] && [ "$1" = "$_music_sock" ]
+}
+
+_music_available() {
+    if [ "$_music_backend" = "mopidy" ]; then
+        command -v python3 >/dev/null 2>&1
+    else
+        [ -S "$_music_sock" ]
+    fi
+}
 
 _probe_idle() {
     # Returns "active", "idle", or "unknown" for the given socket.
@@ -127,10 +140,14 @@ _probe_idle() {
     # on slow links and we see empty replies (popup defaulted to
     # "(idle)" even when channels were active).
     local sock="$1" r
-    [ -S "$sock" ] || { printf 'unknown'; return; }
-    r=$( (printf '%s\n' '{"command":["get_property","idle-active"]}'; sleep 0.3) \
-        | socat -t 2 - "UNIX-CONNECT:$sock" 2>/dev/null \
-        | jq -r 'select(.error=="success")|.data' 2>/dev/null | head -n1)
+    if _is_mopidy_music_sock "$sock"; then
+        r=$("$TTS_CTL" --socket "$sock" get idle-active 2>/dev/null | head -n1)
+    else
+        [ -S "$sock" ] || { printf 'unknown'; return; }
+        r=$( (printf '%s\n' '{"command":["get_property","idle-active"]}'; sleep 0.3) \
+            | socat -t 2 - "UNIX-CONNECT:$sock" 2>/dev/null \
+            | jq -r 'select(.error=="success")|.data' 2>/dev/null | head -n1)
+    fi
     case "$r" in
         true)  printf 'idle' ;;
         false) printf 'active' ;;
@@ -140,10 +157,14 @@ _probe_idle() {
 
 _probe_has_path() {
     local sock="$1" r
-    [ -S "$sock" ] || return 1
-    r=$( (printf '%s\n' '{"command":["get_property","path"]}'; sleep 0.3) \
-        | socat -t 2 - "UNIX-CONNECT:$sock" 2>/dev/null \
-        | jq -r 'select(.error=="success")|.data' 2>/dev/null | head -n1)
+    if _is_mopidy_music_sock "$sock"; then
+        r=$("$TTS_CTL" --socket "$sock" get path 2>/dev/null | head -n1)
+    else
+        [ -S "$sock" ] || return 1
+        r=$( (printf '%s\n' '{"command":["get_property","path"]}'; sleep 0.3) \
+            | socat -t 2 - "UNIX-CONNECT:$sock" 2>/dev/null \
+            | jq -r 'select(.error=="success")|.data' 2>/dev/null | head -n1)
+    fi
     [ -n "$r" ] && [ "$r" != "null" ]
 }
 
@@ -195,14 +216,14 @@ _select_channel() {
             voice) _pin_sock="$_voice_sock" ;;
             music) _pin_sock="$_music_sock" ;;
         esac
-        if [ -n "$_pin_sock" ] && [ -S "$_pin_sock" ]; then
+        if [ -n "$_pin_sock" ] && { [ -S "$_pin_sock" ] || _is_mopidy_music_sock "$_pin_sock"; }; then
             _SOCK="$_pin_sock"; CHANNEL="$_MANUAL_PIN"
             _refresh_alt_marker
             return
         fi
         _MANUAL_PIN=""
     fi
-    if [ -S "$_tts_sock" ] || [ -S "$_voice_sock" ] || [ -S "$_music_sock" ]; then
+    if [ -S "$_tts_sock" ] || [ -S "$_voice_sock" ] || _music_available; then
         if [ "$(_probe_idle "$_tts_sock")" = "active" ]; then
             _SOCK="$_tts_sock"; CHANNEL="tts"
         elif [ "$(_probe_idle "$_voice_sock")" = "active" ]; then
@@ -222,8 +243,10 @@ _select_channel() {
             _SOCK="$_tts_sock"; CHANNEL="tts"
         elif [ -S "$_voice_sock" ]; then
             _SOCK="$_voice_sock"; CHANNEL="voice"
-        else
+        elif _music_available; then
             _SOCK="$_music_sock"; CHANNEL="music"
+        else
+            _SOCK="$_tts_sock"; CHANNEL="tts"
         fi
         _refresh_alt_marker
         return
@@ -247,10 +270,14 @@ _refresh_alt_marker() {
             voice) _s="$_voice_sock" ;;
             music) _s="$_music_sock" ;;
         esac
-        [ -S "$_s" ] || continue
-        _r=$(printf '%s\n' '{"command":["get_property","path"]}' \
-            | socat -T 1 - "UNIX-CONNECT:$_s" 2>/dev/null \
-            | jq -r 'select(.error=="success")|.data' 2>/dev/null | head -n1)
+        if _is_mopidy_music_sock "$_s"; then
+            _r=$("$TTS_CTL" --socket "$_s" get path 2>/dev/null | head -n1)
+        else
+            [ -S "$_s" ] || continue
+            _r=$(printf '%s\n' '{"command":["get_property","path"]}' \
+                | socat -T 1 - "UNIX-CONNECT:$_s" 2>/dev/null \
+                | jq -r 'select(.error=="success")|.data' 2>/dev/null | head -n1)
+        fi
         if [ -n "$_r" ] && [ "$_r" != "null" ]; then
             _HAS_ALT_CHANNEL=1
             return
@@ -277,7 +304,11 @@ _cycle_channel() {
             voice) sock="$_voice_sock" ;;
             music) sock="$_music_sock" ;;
         esac
-        [ -S "$sock" ] || continue
+        if [ "$cand" = "music" ]; then
+            _music_available || continue
+        else
+            [ -S "$sock" ] || continue
+        fi
         _MANUAL_PIN="$cand"
         _SOCK="$sock"; CHANNEL="$cand"
         _refresh_alt_marker
@@ -298,7 +329,7 @@ ctl() { "$TTS_CTL" --socket "$_SOCK" "$@"; }
 _CTL_DIR=""
 _CTL_PATH=""
 _PHONE_HOST=""
-if [ ! -S "$_SOCK" ]; then
+if [ ! -S "$_SOCK" ] && ! _is_mopidy_music_sock "$_SOCK"; then
     _PHONE_HOST="${CLAUDE_TTS_PHONE_HOST:-p8ar}"
     if ! ssh -o BatchMode=yes -O check "$_PHONE_HOST" 2>/dev/null; then
         _CTL_DIR="$(mktemp -d -t tts-popup.XXXXXX)"

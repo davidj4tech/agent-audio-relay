@@ -647,6 +647,12 @@ the music or voice channel instead. Archive-aware ops (`replay`,
 meaningful for tts — on music/voice they degrade to cycle-pause / no-op
 since no archived clip will match.
 
+**Mopidy music backend.** Set `AAR_MUSIC_BACKEND=mopidy` to make the
+`music` channel in `tts-popup`, `tts-status-line`, and `tts-ctl --socket
+.../mpv-music.sock` talk to Mopidy's MPD endpoint instead of mpv IPC.
+Optional connection vars: `MOPIDY_MPD_HOST` (default `127.0.0.1`) and
+`MOPIDY_MPD_PORT` (default `6600`). tts/voice remain on mpv.
+
 Required on the phone: `mpv`, `socat`, `jq`, and an mpv daemon launched
 with `--input-ipc-server=$PREFIX/tmp/mpv-tts.sock --idle=yes`. Override
 the socket with `AAR_MPV_SOCKET` if your daemon binds elsewhere
