@@ -18,14 +18,15 @@ DEFAULT_REPO = "https://github.com/davidj4tech/agent-audio-relay.git"
 
 AGENT_AUDIO_RELAY_RUN = r'''#!{prefix}/bin/sh
 exec 2>&1
-SOCK="$PREFIX/tmp/mpv-tts.sock"
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/agent-audio-relay"
+SOCK="$STATE/mpv-tts.sock"
 i=0
 while [ $i -lt 30 ]; do
   [ -S "$SOCK" ] && break
   i=$((i+1)); sleep 1
 done
 
-mkdir -p "$HOME/.cache/agent-audio-relay/tts-claude" "$HOME/.cache/agent-audio-relay/queue"
+mkdir -p "$STATE" "$HOME/.cache/agent-audio-relay/tts-claude" "$HOME/.cache/agent-audio-relay/tts-pi" "$HOME/.cache/agent-audio-relay/queue"
 
 export RELAY_BACKEND="${RELAY_BACKEND:-mpv}"
 export RELAY_MPV_SOCKET="${RELAY_MPV_SOCKET:-$SOCK}"
@@ -41,16 +42,46 @@ exec "$HOME/.local/bin/agent-audio-relay"
 
 MPV_TTS_RUN = r'''#!{prefix}/bin/sh
 exec 2>&1
-SOCK="$PREFIX/tmp/mpv-tts.sock"
-rm -f "$SOCK"
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/agent-audio-relay"
+SOCK="$STATE/mpv-tts.sock"
+LEGACY="$PREFIX/tmp/mpv-tts.sock"
+mkdir -p "$STATE"
+rm -f "$SOCK" "$LEGACY"
+ln -s "$SOCK" "$LEGACY"
 # --ao=opensles so Android audio focus pauses TTS on incoming calls.
 exec mpv --idle=yes --ao=opensles --force-window=no --input-ipc-server="$SOCK" --volume=100 --keep-open=no
+'''
+
+
+MPV_VOICE_RUN = r'''#!{prefix}/bin/sh
+exec 2>&1
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/agent-audio-relay"
+SOCK="$STATE/mpv-voice.sock"
+LEGACY="$PREFIX/tmp/mpv-voice.sock"
+mkdir -p "$STATE"
+rm -f "$SOCK" "$LEGACY"
+ln -s "$SOCK" "$LEGACY"
+exec mpv --idle=yes --force-window=no --input-ipc-server="$SOCK" --ytdl=yes --volume=85
+'''
+
+
+MPV_MUSIC_RUN = r'''#!{prefix}/bin/sh
+exec 2>&1
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/agent-audio-relay"
+SOCK="$STATE/mpv-music.sock"
+LEGACY="$PREFIX/tmp/mpv-music.sock"
+mkdir -p "$STATE"
+rm -f "$SOCK" "$LEGACY"
+ln -s "$SOCK" "$LEGACY"
+exec mpv --idle=yes --force-window=no --input-ipc-server="$SOCK" --ytdl=yes --volume=70
 '''
 
 
 SERVICE_RUNS = {
     "agent-audio-relay": AGENT_AUDIO_RELAY_RUN,
     "mpv-tts": MPV_TTS_RUN,
+    "mpv-voice": MPV_VOICE_RUN,
+    "mpv-music": MPV_MUSIC_RUN,
 }
 
 
