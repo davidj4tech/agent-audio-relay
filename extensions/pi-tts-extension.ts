@@ -11,9 +11,11 @@
  * Engines (PI_TTS_ENGINE):
  *   edge (default)  — Spawns the `edge-tts` CLI (free, no key).
  *                     Voice: PI_TTS_VOICE (default "en-US-AriaNeural").
- *   openai          — POSTs to https://api.openai.com/v1/audio/speech
- *                     using OPENAI_API_KEY. Voice: PI_TTS_VOICE (default "marin").
- *                     Falls back to edge if OpenAI TTS fails.
+ *   openai          — Uses OPENAI_API_KEY. For speech models, POSTs to
+ *                     /v1/audio/speech. For realtime models (`gpt-realtime-*`),
+ *                     uses the Realtime WebSocket API and writes WAV.
+ *                     Voice: PI_TTS_VOICE (default "marin"). Falls back to
+ *                     edge if OpenAI TTS fails.
  *   piper           — Local Piper via the Wyoming TCP protocol. Sub-200ms
  *                     end-to-end synthesis on a typical clip. Writes WAV.
  *                     Env: PI_TTS_PIPER_HOST (default 100.125.48.108 / homer),
@@ -138,6 +140,10 @@ async function ttsOpenAI(text: string, outfile: string): Promise<void> {
 	if (!key) throw new Error("OPENAI_API_KEY not set");
 	const model = process.env.PI_TTS_OPENAI_MODEL || "gpt-4o-mini-tts";
 	const voice = process.env.PI_TTS_VOICE || "marin";
+	if (/^(gpt-)?realtime/i.test(model) || /realtime/i.test(model)) {
+		await ttsOpenAIRealtime(text, outfile, model, voice, key);
+		return;
+	}
 	const res = await fetch("https://api.openai.com/v1/audio/speech", {
 		method: "POST",
 		headers: {
@@ -152,6 +158,56 @@ async function ttsOpenAI(text: string, outfile: string): Promise<void> {
 	}
 	const buf = Buffer.from(await res.arrayBuffer());
 	writeFileSync(outfile, buf);
+}
+
+function ttsOpenAIRealtime(text: string, outfile: string, model: string, voice: string, key: string): Promise<void> {
+	return new Promise((resolve, reject) => {
+		const WS = (globalThis as any).WebSocket;
+		if (!WS) return reject(new Error("WebSocket unavailable in this Node runtime"));
+		const chunks: Buffer[] = [];
+		let settled = false;
+		const done = (err?: Error) => {
+			if (settled) return;
+			settled = true;
+			try { ws.close(); } catch {}
+			if (err) return reject(err);
+			const pcm = Buffer.concat(chunks);
+			if (!pcm.length) return reject(new Error("realtime produced no audio"));
+			writeFileSync(outfile, wavWrap(pcm, 24000, 2, 1));
+			resolve();
+		};
+		const ws = new WS(`wss://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`, {
+			headers: { Authorization: `Bearer ${key}` },
+		});
+		const timer = setTimeout(() => done(new Error("realtime tts timeout")), 30000);
+		ws.onopen = () => {
+			ws.send(JSON.stringify({
+				type: "session.update",
+				session: {
+					type: "realtime",
+					audio: { output: { voice, format: { type: "audio/pcm", rate: 24000 } } },
+				},
+			}));
+			ws.send(JSON.stringify({
+				type: "response.create",
+				response: { output_modalities: ["audio"], instructions: text },
+			}));
+		};
+		ws.onerror = () => done(new Error("realtime websocket error"));
+		ws.onmessage = (ev: any) => {
+			let msg: any;
+			try { msg = JSON.parse(String(ev.data)); } catch { return; }
+			if (msg.type === "response.output_audio.delta" && msg.delta) {
+				chunks.push(Buffer.from(msg.delta, "base64"));
+			} else if (msg.type === "error") {
+				clearTimeout(timer);
+				done(new Error(msg.error?.message || "realtime error"));
+			} else if (msg.type === "response.done") {
+				clearTimeout(timer);
+				done();
+			}
+		};
+	});
 }
 
 async function ttsQwen(text: string, outfile: string): Promise<void> {
@@ -316,7 +372,8 @@ export default function (pi: ExtensionAPI) {
 			mkdirSync(dropDir, { recursive: true });
 
 			const engine = (process.env.PI_TTS_ENGINE || "edge").toLowerCase();
-			const ext = (engine === "piper" || engine === "qwen") ? "wav" : "mp3";
+			const openaiModel = process.env.PI_TTS_OPENAI_MODEL || "gpt-4o-mini-tts";
+			const ext = (engine === "piper" || engine === "qwen" || (engine === "openai" && /realtime/i.test(openaiModel))) ? "wav" : "mp3";
 			const outfile = join(dropDir, `${makeStem("pi", "stop")}.${ext}`);
 			let published = outfile;
 

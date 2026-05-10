@@ -472,7 +472,7 @@ cp extensions/pi-tts-extension.ts ~/.pi/agent/extensions/agent-audio-relay-tts.t
 | `PI_TTS_ENABLED` | `1` | Set to `0` to disable |
 | `PI_TTS_ENGINE` | `edge` | `openai` or `edge`; OpenAI falls back to Edge on failure |
 | `PI_TTS_VOICE` | `marin` (openai) / `en-US-AriaNeural` (edge) | Voice name |
-| `PI_TTS_OPENAI_MODEL` | `gpt-4o-mini-tts` | OpenAI TTS model |
+| `PI_TTS_OPENAI_MODEL` | `gpt-4o-mini-tts` | OpenAI TTS model. Speech models use `/v1/audio/speech`; realtime models like `gpt-realtime-2` use the Realtime WebSocket API and emit WAV. |
 | `PI_TTS_EDGE_BIN` | `edge-tts` | Path to `edge-tts` (engine=edge) |
 | `PI_TTS_DROP_DIR` | `~/.cache/agent-audio-relay/tts-pi` | Audio drop directory |
 | `PI_TTS_MAX_CHARS` | `4000` | Cap on text length sent to TTS |
